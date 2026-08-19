@@ -764,6 +764,8 @@ base 里可用这些协调技能：
 arisc update
 ```
 
+该命令会先使用 `git pull --ff-only` 更新 ARISC 当前分支，然后同步远端 ARISC 所固定的 ARIS Skills commit，并收敛所有项目。它不会自动创建合并提交；如果本地与远端已经分叉，会安全退出并保留现状。
+
 只收敛项目，不更新 submodule：
 
 ```bash

@@ -323,13 +323,13 @@ arisc env path <slug>
 | `arisc repo` | 初始化、选择或更新 ARIS Codex 研究技能仓库 |
 | `arisc repo status` | 查看根目录 submodule 的远端、提交与 Codex 链路状态 |
 | `arisc repo setup [path]` | 默认初始化根目录 submodule；也可验证自定义仓库路径 |
-| `arisc update` | 同步 ARISC Git 固定的 submodule commit，并收敛所有项目技能链接 |
+| `arisc update` | Fast-forward 更新 ARISC，同步其固定的 submodule commit，并收敛所有项目技能链接 |
 | `arisc completion bash` | 输出 Bash completion 脚本 |
 | `arisc completion zsh` | 输出 Zsh completion 脚本 |
 
 设备专属的绝对路径写在根目录 `config` 中，该文件被 Git 忽略。发布仓库不会包含维护者机器上的路径。
 
-普通用户执行 `arisc update` 时只会同步当前 ARISC 版本记录的固定 gitlink，从而保证同一 ARISC commit 使用同一套 Research Skills。仓库的定时 GitHub Actions 每天北京时间 06:00 检查官方 ARIS `main`；发现新提交后，机器人会更新 `wangtianci2004/arisc` 中的 gitlink 并触发完整 CI。用户下一次 `git pull` 后即可获得经过 ARISC 仓库记录的新固定版本。
+普通用户执行 `arisc update` 时，会先通过 `git pull --ff-only` 将当前 ARISC 分支更新到其远端最新版，再同步该版本记录的固定 gitlink，从而获得 `wangtianci2004/arisc` 最近一次验证并固定的 Research Skills。仓库的定时 GitHub Actions 每天北京时间 06:00 检查官方 ARIS `main`；发现新提交后，机器人会更新 `wangtianci2004/arisc` 中的 gitlink 并触发完整 CI。用户随后只需运行 `arisc update`，即可获取远端最新的固定版本；如果本地提交导致无法 fast-forward，命令会安全退出而不会自动合并。
 
 ## 架构与目录
 

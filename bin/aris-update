@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# aris-update：拉取 ARIS 上游并收敛每个项目的 Codex 技能链接。
+# aris-update：更新 ARISC、同步其固定的 ARIS 上游并收敛每个项目的 Codex 技能链接。
 set -euo pipefail
 
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
@@ -34,10 +34,10 @@ usage() {
   cat >&2 <<'EOF'
 用法：arisc update [--repo-only] [--projects-only]
 
-  --repo-only        只更新 ARIS skills submodule/仓库，跳过项目收敛
+  --repo-only        只更新 ARISC 与 ARIS skills submodule/仓库，跳过项目收敛
   --projects-only    只收敛每个项目，跳过上游更新
 
-默认：先同步 ARISC Git 记录的固定 submodule 版本，再对每个项目执行 install_aris_codex.sh 自动安装/收敛。
+默认：先以 fast-forward 更新 ARISC，再同步其 Git 记录的固定 submodule 版本，最后对每个项目执行 install_aris_codex.sh 自动安装/收敛。
 EOF
   exit 2
 }
@@ -61,6 +61,8 @@ if ! $PROJECTS_ONLY; then
   echo "[INFO] 1/2 拉取上游：$ARIS_REPO"
   if [[ "$ARIS_REPO" == "$BUNDLED_REPO" && -f "$WORKSPACE_ROOT/.gitmodules" ]] &&
     git -C "$WORKSPACE_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "[INFO] 更新 ARISC 主仓库（仅允许 fast-forward）"
+    git -C "$WORKSPACE_ROOT" pull --ff-only
     git -C "$WORKSPACE_ROOT" submodule sync -- "$BUNDLED_PATH"
     git -C "$WORKSPACE_ROOT" submodule update --init --checkout --recursive -- "$BUNDLED_PATH"
   else

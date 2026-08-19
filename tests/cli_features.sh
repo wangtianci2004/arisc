@@ -29,6 +29,14 @@ if grep -Fq -- 'submodule update --init --remote' "$SOURCE_ROOT/bin/aris-update"
   fail "user-facing submodule update still follows unpinned remote HEAD"
 fi
 
+pull_line=$(grep -nF 'git -C "$WORKSPACE_ROOT" pull --ff-only' "$SOURCE_ROOT/bin/aris-update" | head -n1 | cut -d: -f1)
+submodule_line=$(grep -nF 'git -C "$WORKSPACE_ROOT" submodule update --init --checkout --recursive' "$SOURCE_ROOT/bin/aris-update" | head -n1 | cut -d: -f1)
+if [[ -z "$pull_line" ]]; then
+  fail "arisc update does not fast-forward the ARISC repository"
+elif [[ -z "$submodule_line" || "$pull_line" -ge "$submodule_line" ]]; then
+  fail "arisc update must pull ARISC before checking out its pinned submodule commit"
+fi
+
 if [[ ! -x "$SOURCE_ROOT/uninstall.sh" ]]; then
   fail "uninstall.sh is missing or not executable"
 else

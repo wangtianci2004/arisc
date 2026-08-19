@@ -67,7 +67,7 @@ arisc：多项目 ARISC 工作区管理器
 
 维护
   repo                设置、克隆或拉取 ARIS Codex skills 仓库；支持非交互 setup
-  update              同步 ARISC 固定的 skills commit，并收敛所有项目技能
+  update              更新 ARISC，同步其固定的 skills commit，并收敛所有项目技能
   base-init           从模板和共享技能物化 base 环境
                       --force-templates 会刷新内置技能模板
   doctor              检查项目、工作区和外部工具；支持 --json
@@ -133,7 +133,7 @@ arisc：多项目 ARISC 工作区管理器
   cd $(arisc path llm-tokenizer)              # 进入项目目录
   arisc del llm-tokenizer                     # 软删除，默认需要确认
   arisc restore llm-tokenizer                 # 恢复软删除项目
-  arisc update                                # 更新根目录 submodule 并收敛所有项目
+  arisc update                                # 更新 ARISC、根目录 submodule 并收敛所有项目
   arisc doctor                                # 检查悬空链接和缺失文件
   arisc doctor --json                         # 输出机器可读检查结果
   arisc audit                                 # 审计命令、文档和 base 技能同步情况
