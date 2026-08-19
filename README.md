@@ -491,6 +491,8 @@ ARISC 的 AIRS 研究工作流与 Codex Skills 集成建立在开源项目 [wans
 
 特别感谢 ARIS / AIRS 项目的作者与所有贡献者，为自动化科研流程、研究技能体系和持续运行的 AI Research 实践提供了重要基础。ARISC 在此之上专注于多项目工作区隔离、环境管理、后台会话、可观测性与跨设备配置。
 
+本项目受到 LINUX DO 社区的交流与反馈支持：[访问 LINUX DO 社区](https://linux.do/)
+
 ## 许可证
 
 ARISC 以 [MIT License](LICENSE) 开源。你可以自由使用、复制、修改、合并、发布和分发本项目，但需保留版权与许可声明。
