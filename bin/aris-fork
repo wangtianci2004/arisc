@@ -253,7 +253,7 @@ else
   echo "[INFO] 初始化项目 Git 仓库"
   git init -q
   git add .gitignore RESEARCH_BRIEF.md pyproject.toml AGENTS.md
-  git -c user.email=aris@local -c user.name=aris commit -q -m "初始化 ARIS-Codex fork 项目骨架" 2>/dev/null || true
+  git -c user.email=aris@local -c user.name=aris commit -q -m "初始化 ARISC fork 项目骨架" 2>/dev/null || true
 fi
 
 cat <<EOF

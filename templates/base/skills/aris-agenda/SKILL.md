@@ -1,6 +1,6 @@
 ---
 name: aris-agenda
-description: "基于 ARIS-Codex 告警生成只读接管议程。用于用户说“下一步先处理什么”、“给我接管顺序”、“agenda”、“安排一下 blocked 项目处理顺序”等场景。"
+description: "基于 ARISC 告警生成只读接管议程。用于用户说“下一步先处理什么”、“给我接管顺序”、“agenda”、“安排一下 blocked 项目处理顺序”等场景。"
 argument-hint: "[--json] [--only blocked|attention|waiting|stopped] [--sort severity|name]"
 allowed-tools: Bash(arisc *)
 ---

@@ -1,6 +1,6 @@
 ---
 name: aris-activate
-description: "输出可 eval 的 ARIS-Codex 项目环境激活脚本。用于用户说“激活项目环境”、“像 conda activate 一样进入环境”、“给我当前 shell 用的项目环境”等场景。"
+description: "输出可 eval 的 ARISC 项目环境激活脚本。用于用户说“激活项目环境”、“像 conda activate 一样进入环境”、“给我当前 shell 用的项目环境”等场景。"
 argument-hint: "[--no-env] [--no-venv] [--no-cd] <slug>"
 allowed-tools: Bash(arisc *)
 ---

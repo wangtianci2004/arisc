@@ -104,5 +104,5 @@ EOF
 fi
 
 cat <<'EOF'
-echo "[OK] 已激活 ARIS-Codex 项目环境：$ARIS_ENV_NAME" >&2
+echo "[OK] 已激活 ARISC 项目环境：$ARIS_ENV_NAME" >&2
 EOF

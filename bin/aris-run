@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# aris-run：在指定 ARIS-Codex 项目环境中执行命令。
+# aris-run：在指定 ARISC 项目环境中执行命令。
 set -euo pipefail
 
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"

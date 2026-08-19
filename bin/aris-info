@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# aris-info：输出 ARIS-Codex 工作区或项目的只读信息。
+# aris-info：输出 ARISC 工作区或项目的只读信息。
 set -euo pipefail
 
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
@@ -115,7 +115,7 @@ render_workspace_text() {
   arisc_path="$(printf '%s\n' "$info_json" | jq -r '.global.arisc // ""')"
   aris_path="$(printf '%s\n' "$info_json" | jq -r '.global.aris // ""')"
 
-  echo "# ARIS-Codex 信息"
+  echo "# ARISC 信息"
   echo ""
   echo "- 生成时间：$(date '+%Y-%m-%dT%H:%M:%S%z')"
   echo "- 工作区：$WORKSPACE_ROOT"
@@ -162,7 +162,7 @@ render_project_text() {
   git_dirty="$(printf '%s\n' "$item" | jq -r '.git.dirty')"
   git_last="$(printf '%s\n' "$item" | jq -r '.git.last_commit')"
 
-  echo "# ARIS-Codex 环境信息"
+  echo "# ARISC 环境信息"
   echo ""
   echo "- 环境：$TARGET"
   echo "- 路径：$project_dir"

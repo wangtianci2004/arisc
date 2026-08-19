@@ -159,7 +159,7 @@ render_text() {
   stopped="$(printf '%s\n' "$alerts_json" | jq -r '.summary.stopped')"
 
   if ! $EMBED; then
-    echo "# ARIS-Codex 接管议程"
+    echo "# ARISC 接管议程"
     echo ""
   fi
   echo "- 生成时间：$(date '+%Y-%m-%dT%H:%M:%S%z')"

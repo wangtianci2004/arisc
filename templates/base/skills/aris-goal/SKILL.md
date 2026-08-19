@@ -1,6 +1,6 @@
 ---
 name: aris-goal
-description: "向某个 ARIS-Codex 项目投递 Codex /goal，让项目在 tmux 后台持续执行。用于用户说“让 <slug> 自动干”、“给 <slug> 设置长期目标”、“持续推进这个项目”、“后台跑 goal”等场景。"
+description: "向某个 ARISC 项目投递 Codex /goal，让项目在 tmux 后台持续执行。用于用户说“让 <slug> 自动干”、“给 <slug> 设置长期目标”、“持续推进这个项目”、“后台跑 goal”等场景。"
 argument-hint: "<slug> <goal...> [--create] [--resume] [--dry-run] | --batch FILE|- [--dry-run] [--create] [--resume] [--continue-on-error] | --status [--json] [slug] | --alerts [--json] [--summary] [--sort severity|name] [--only X] [--pane-lines N] | --peek <slug> [N]"
 allowed-tools: Bash(arisc *)
 ---

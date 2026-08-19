@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# arisc：ARIS-Codex 工作区子命令分发器。
+# arisc：ARISC 工作区子命令分发器。
 
 if (( BASH_VERSINFO[0] < 4 )); then
   if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -30,7 +30,7 @@ DISPATCH_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 
 print_help() {
   cat <<'EOF'
-arisc：多项目 ARIS-Codex 工作区管理器
+arisc：多项目 ARISC 工作区管理器
 
 用法
   arisc <subcommand> [args...]
@@ -57,10 +57,8 @@ arisc：多项目 ARIS-Codex 工作区管理器
   activate <slug>     输出可 eval 的项目环境激活脚本，类似 conda activate
   run <slug> -- <cmd> 在指定项目目录和 .venv 环境中执行命令
   send <slug> <msg>   向正在运行的项目 Codex 会话发送单行指令
-  tail <slug> [N]     当前阶段明确报错；不解析 Codex 全局会话历史
   enter <slug>        连接或创建 tmux 托管的 Codex 会话
   enter base          进入工作区级 Codex base 环境，工作目录为 projects/
-  happy <slug>        ARIS-Codex 暂不支持；保留命令并明确报错
   ls                  列出所有项目的阶段和 tmux 状态；支持 --json
   path <slug>         输出项目绝对路径，便于 cd $(arisc path foo)
   del <slug>          软删除项目到 .trash/，并结束对应 tmux 会话
@@ -69,12 +67,13 @@ arisc：多项目 ARIS-Codex 工作区管理器
 
 维护
   repo                设置、克隆或拉取 ARIS Codex skills 仓库；支持非交互 setup
-  update              拉取 ARIS_REPO，并收敛所有项目的 Codex skill 链接
+  update              同步 ARISC 固定的 skills commit，并收敛所有项目技能
   base-init           从模板和共享技能物化 base 环境
                       --force-templates 会刷新内置技能模板
   doctor              检查项目、工作区和外部工具；支持 --json
   audit               只读审计 CLI、文档和 base 技能是否同步
   purge               永久删除超过 N 天的回收站条目，默认 30 天
+  completion <shell>  输出 Bash 或 Zsh 补全脚本
 
 帮助
   help                显示本帮助
@@ -175,7 +174,7 @@ case "$sub" in
     print_help
     exit 0
     ;;
-  new|fork|goal|auto|base|status|alerts|agenda|triage|report|reports|watch|info|inspect|env|repair|activate|run|send|tail|ls|enter|del|restore|rename|path|repo|update|doctor|audit|purge|happy|base-init)
+  new|fork|goal|auto|base|status|alerts|agenda|triage|report|reports|watch|info|inspect|env|repair|activate|run|send|ls|enter|del|restore|rename|path|repo|update|doctor|audit|purge|base-init|completion)
     target="$DISPATCH_DIR/aris-$sub"
     if [[ ! -x "$target" ]]; then
       echo "[ERROR] $target 缺失或不可执行" >&2

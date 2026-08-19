@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# aris-repair：给已有项目补齐 ARIS-Codex 运行骨架。
+# aris-repair：给已有项目补齐 ARISC 运行骨架。
 set -euo pipefail
 
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
@@ -115,7 +115,7 @@ ensure_trailing_newline() {
 ensure_gitignore_rule() {
   local project_dir="$1" rule="$2" gitignore="$1/.gitignore"
   if [[ ! -f "$gitignore" ]]; then
-    printf '# ARIS-Codex runtime\n' > "$gitignore"
+    printf '# ARISC runtime\n' > "$gitignore"
   fi
   if ! grep -qxF "$rule" "$gitignore"; then
     ensure_trailing_newline "$gitignore"

@@ -1,4 +1,4 @@
-# ARIS-Codex 使用说明
+# ARISC 使用说明
 
 `arisc` 是这个工作区的全局命令。它像 conda 管理环境一样管理科研项目：每个项目是一个独立环境，有自己的 `.codex/` 元数据、`.agents/skills/` 技能入口、Python 虚拟环境、Git 仓库和 tmux 后台 Codex 会话。
 
@@ -17,6 +17,13 @@ exec $SHELL -l
 ```
 
 当前安装脚本会把 `~/arisc/bin/arisc` 注册为 `~/.local/bin/arisc`。你的 `PATH` 中已有 `~/.local/bin` 时，终端可以直接运行 `arisc`。
+
+启用命令补全：
+
+```bash
+source <(arisc completion bash)
+# Zsh: source <(arisc completion zsh)
+```
 
 macOS 需要先安装 Homebrew 依赖：
 
@@ -456,33 +463,12 @@ arisc send llm-tokenizer --dry-run --pane-lines 10 -- "只预览，不发送"
 /aris-send llm-tokenizer 继续整理实验计划，先列出当前阻塞点
 ```
 
-## 查看会话尾部
-
-`arisc tail` 当前阶段不会解析 Codex 全局历史。Codex 会话历史位于 `~/.codex/sessions/`，来源工作区中的其他会话格式不会被读取。
-
-```bash
-arisc tail llm-tokenizer 20
-```
-
-行为：
-
-- 命令会明确返回不支持状态，退出码为 `2`。
-- 如果目标 tmux 会话正在运行且属于当前 workspace，会附带显示当前 pane 末尾 N 行作为替代。
-- 如果目标会话未运行，会提示使用 `arisc enter <slug>`。
-- 后续要基于 Codex 官方会话记录格式实现项目 cwd 过滤和最新会话选择，不能复用 Claude 路径规则。
-
-从 base 里也可以使用：
-
-```text
-/aris-tail llm-tokenizer 20
-```
-
 ## tmux 隔离规则
 
 当前 ARISC workspace 可以和其他临时 workspace 同时运行。命令会校验 tmux pane 当前目录：
 
 - `arisc ls`、`arisc enter --list`、`arisc goal --status`、`arisc watch` 和 `arisc report` 只显示当前 `WORKSPACE_ROOT/projects/<slug>` 对应的会话。
-- `arisc goal`、`arisc goal --peek`、`arisc send`、`arisc tail`、`arisc enter`、`arisc enter --kill`、`arisc del`、`arisc rename`、`/aris-send` 和 `/aris-tail` 遇到同名但目录不匹配的会话时会拒绝操作。
+- `arisc goal`、`arisc goal --peek`、`arisc send`、`arisc enter`、`arisc enter --kill`、`arisc del`、`arisc rename` 和 `/aris-send` 遇到同名但目录不匹配的会话时会拒绝操作。
 - 如果要人工处理外部 tmux 会话，先运行 `tmux list-sessions` 和 `tmux display-message -p -t =<session>:0.0 '#{pane_current_path}'` 确认目录。
 
 ## 修复已有项目骨架
@@ -615,7 +601,6 @@ base 里可用这些协调技能：
 /aris-reports [--type report|triage|env|snapshot|status|doctor|audit|all] [--json] [--show latest|N]
 /aris-info [slug|base] [--json]
 /aris-send <slug> <message>
-/aris-tail <slug> [N]
 /aris-watch [--with-pane]
 ```
 
@@ -764,8 +749,6 @@ base 里可用这些协调技能：
 /aris-send llm-tokenizer 继续整理实验计划，先给我一个三步执行表
 ```
 
-`/aris-tail` 当前阶段会明确报错。Codex 会话历史存储在 `~/.codex/sessions/`；在实现可靠的会话解析前，ARISC 不读取其他历史格式。
-
 `/aris-watch` 用于输出一屏只读监控状态：
 
 ```text
@@ -775,7 +758,7 @@ base 里可用这些协调技能：
 
 ## 更新 skills 和项目
 
-更新根目录 ARIS skills submodule 并收敛所有项目：
+同步当前 ARISC Git 记录的固定 ARIS skills commit，并收敛所有项目：
 
 ```bash
 arisc update
@@ -895,16 +878,6 @@ arisc purge --older-than 7
 arisc purge --all
 ```
 
-## happy 命令
-
-Codex 版保留 `happy` 子命令，但不支持启动：
-
-```bash
-arisc happy <slug>
-```
-
-它会明确报错，说明该辅助能力当前不可用。
-
 ## 常见问题
 
 `arisc` 找不到：
@@ -931,3 +904,19 @@ arisc repair <slug>
 ```bash
 arisc doctor
 ```
+
+## 卸载 ARISC
+
+默认保留项目、密钥和报告：
+
+```bash
+~/arisc/uninstall.sh --keep-data
+```
+
+预览卸载计划：
+
+```bash
+~/arisc/uninstall.sh --keep-data --dry-run
+```
+
+永久删除全部 ARISC 数据需要显式使用 `--purge` 并完成二次确认。需要 Agent 先检查和解释卸载范围时，使用根目录 `AGENT_UNINSTALL_PROMPT.md`。

@@ -20,7 +20,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -41,7 +41,7 @@ jobs:
         run: make syntax
 
       - name: Run ShellCheck
-        run: shellcheck --severity=error install.sh bin/* tests/*.sh
+        run: shellcheck --severity=error install.sh uninstall.sh bin/* lib/*.sh tests/*.sh
 
       - name: Run isolated smoke tests
         run: make smoke

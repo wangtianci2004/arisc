@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# aris-base：ARIS-Codex base 工作区监控和接管入口。
+# aris-base：ARISC base 工作区监控和接管入口。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -150,7 +150,7 @@ EOF
   save_snapshot_json_artifact "audit JSON" "$audit_file" "$SCRIPT_DIR/aris-audit" --json
 
   {
-    echo "# ARIS-Codex Base 快照"
+    echo "# ARISC Base 快照"
     echo ""
     echo "- 生成时间：$generated_at"
     echo "- 工作区：$WORKSPACE_ROOT"
@@ -282,7 +282,7 @@ EOF
     return 0
   fi
 
-  echo "# ARIS-Codex Base 摘要"
+  echo "# ARISC Base 摘要"
   echo ""
   echo "- 生成时间：$(date '+%Y-%m-%dT%H:%M:%S%z')"
   echo "- 工作区：$WORKSPACE_ROOT"

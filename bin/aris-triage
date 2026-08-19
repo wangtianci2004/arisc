@@ -196,7 +196,7 @@ render_text() {
   if $EMBED; then
     heading="###"
   else
-    echo "# ARIS-Codex 接管诊断"
+    echo "# ARISC 接管诊断"
     echo ""
   fi
   echo "- 生成时间：$(date '+%Y-%m-%dT%H:%M:%S%z')"

@@ -1,6 +1,6 @@
 ---
 name: aris-report
-description: "生成 ARIS-Codex 工作区只读交接报告。用于用户说“交接报告”、“早上接管”、“整晚进度”、“汇总所有项目”等场景。"
+description: "生成 ARISC 工作区只读交接报告。用于用户说“交接报告”、“早上接管”、“整晚进度”、“汇总所有项目”等场景。"
 argument-hint: "[--with-pane] [--pane-lines N] [--with-agenda] [--with-triage] [--no-doctor] [--save] [--out FILE]"
 allowed-tools: Bash(arisc *)
 ---

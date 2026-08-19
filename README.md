@@ -10,6 +10,7 @@
 [![Shell: Bash](https://img.shields.io/badge/Shell-Bash-4EAA25?logo=gnubash&logoColor=white)](https://www.gnu.org/software/bash/)
 [![Platform: Linux, macOS & WSL2](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20WSL2-0f172a?logo=apple&logoColor=white)](#系统要求)
 [![Version](https://img.shields.io/badge/version-0.1.0-6366f1.svg)](CHANGELOG.md)
+[![GitHub Release](https://img.shields.io/github/v/release/wangtianci2004/arisc?display_name=tag)](https://github.com/wangtianci2004/arisc/releases/latest)
 [![Code style: ShellCheck](https://img.shields.io/badge/style-ShellCheck-7c3aed.svg)](https://www.shellcheck.net/)
 
 [快速开始](#快速开始) · [功能全景](#功能全景) · [命令参考](#命令参考) · [架构](#架构与目录) · [贡献](#参与贡献)
@@ -77,12 +78,26 @@ brew install bash jq tmux uv
 
 卸载提示词默认不会直接删除 `projects/`、`shared/`、`reports/`、`.trash/` 或 `config`；Agent 必须先让你选择备份、保留或永久删除。
 
+普通用户也可以直接运行确定性的卸载器；默认会把本地数据移动到带时间戳的 `$HOME/arisc-data-*` 目录：
+
+```bash
+~/arisc/uninstall.sh --keep-data
+```
+
 ### 新设备一键配置
 
 在新设备执行下面的一键安装命令：
 
 ```bash
 git clone --recurse-submodules https://github.com/wangtianci2004/arisc.git ~/arisc \
+  && ~/arisc/install.sh --yes
+```
+
+需要固定安装首个稳定版本时使用：
+
+```bash
+git clone --branch v0.1.0 --recurse-submodules \
+  https://github.com/wangtianci2004/arisc.git ~/arisc \
   && ~/arisc/install.sh --yes
 ```
 
@@ -137,6 +152,22 @@ arisc enter my-research
 ```
 
 默认上游以根目录 Git submodule 管理，GitHub 会显示为 `aris-codex-skills @ <commit>`。高级用户仍可通过 `--repo-path` 临时使用自定义技能仓库。
+
+### Shell completion
+
+在 Bash 中启用当前终端补全：
+
+```bash
+source <(arisc completion bash)
+```
+
+在 Zsh 中启用当前终端补全：
+
+```zsh
+source <(arisc completion zsh)
+```
+
+补全支持顶层命令、常用参数和现有项目 slug。需要永久启用时，把对应 `source` 行加入自己的 shell rc。
 
 ## 功能全景
 
@@ -198,8 +229,6 @@ arisc report --save
 | `arisc send <slug> -- <message>` | 向正在运行的项目发送单行指令 |
 | `arisc run <slug> -- <command>` | 在项目目录和 `.venv` 环境中执行命令 |
 | `arisc activate <slug>` | 输出可由 `eval` 使用的环境激活脚本 |
-| `arisc tail <slug> [N]` | 显示当前阶段可获得的会话尾部或明确说明不可用原因 |
-| `arisc happy <slug>` | 当前明确返回“不支持”的辅助命令 |
 
 自动化场景还可以使用：
 
@@ -294,9 +323,13 @@ arisc env path <slug>
 | `arisc repo` | 初始化、选择或更新 ARIS Codex 研究技能仓库 |
 | `arisc repo status` | 查看根目录 submodule 的远端、提交与 Codex 链路状态 |
 | `arisc repo setup [path]` | 默认初始化根目录 submodule；也可验证自定义仓库路径 |
-| `arisc update` | 更新根目录 submodule，并收敛所有项目技能链接 |
+| `arisc update` | 同步 ARISC Git 固定的 submodule commit，并收敛所有项目技能链接 |
+| `arisc completion bash` | 输出 Bash completion 脚本 |
+| `arisc completion zsh` | 输出 Zsh completion 脚本 |
 
 设备专属的绝对路径写在根目录 `config` 中，该文件被 Git 忽略。发布仓库不会包含维护者机器上的路径。
+
+普通用户执行 `arisc update` 时只会同步当前 ARISC 版本记录的固定 gitlink，从而保证同一 ARISC commit 使用同一套 Research Skills。仓库的定时 GitHub Actions 每天北京时间 06:00 检查官方 ARIS `main`；发现新提交后，机器人会更新 `wangtianci2004/arisc` 中的 gitlink 并触发完整 CI。用户下一次 `git pull` 后即可获得经过 ARISC 仓库记录的新固定版本。
 
 ## 架构与目录
 
@@ -421,6 +454,14 @@ git status --short
 - 不要把 `.env`、私有数据集、会话日志或带凭据的诊断输出粘贴到 Issue。
 - 发现安全问题时请按 [SECURITY.md](SECURITY.md) 使用私密渠道报告。
 - `arisc audit` 是一致性检查，不是恶意代码扫描器或沙箱。
+
+安全卸载：
+
+```bash
+~/arisc/uninstall.sh --keep-data   # 移出并保留本地数据
+~/arisc/uninstall.sh --backup "$HOME/arisc-backup" # 备份后卸载
+~/arisc/uninstall.sh --purge       # 二次确认后永久删除全部数据
+```
 
 ## 参与贡献
 

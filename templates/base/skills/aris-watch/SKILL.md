@@ -1,6 +1,6 @@
 ---
 name: aris-watch
-description: "输出一屏 ARIS-Codex 只读监控状态。用于用户说“监控一下”、“看后台运行状态”、“watch all projects”等场景。"
+description: "输出一屏 ARISC 只读监控状态。用于用户说“监控一下”、“看后台运行状态”、“watch all projects”等场景。"
 argument-hint: "[--with-pane] [--pane-lines N]"
 allowed-tools: Bash(arisc *)
 ---

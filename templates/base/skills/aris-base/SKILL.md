@@ -1,6 +1,6 @@
 ---
 name: aris-base
-description: "ARIS-Codex base 工作区统一监控和接管入口。用于用户说“base 状态”、“base 监控”、“接管议程”、“接管摘要”、“自动推进并监控”、“生成交接报告”、“保存 base 快照”、“进入 base”等场景。"
+description: "ARISC base 工作区统一监控和接管入口。用于用户说“base 状态”、“base 监控”、“接管议程”、“接管摘要”、“自动推进并监控”、“生成交接报告”、“保存 base 快照”、“进入 base”等场景。"
 argument-hint: "[status|watch|alerts|agenda|summary|auto|triage|report|reports|snapshot|info|enter|doctor|audit|init] ..."
 allowed-tools: Bash(arisc *)
 ---

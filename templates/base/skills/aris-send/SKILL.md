@@ -1,6 +1,6 @@
 ---
 name: aris-send
-description: "向另一个 ARIS-Codex 项目的 tmux-backed Codex 会话发送指令。用于用户说“告诉 <slug> 干啥”、“send to <slug>”、“指挥那个 agent”、“让 <slug> 做 X”、“broadcast”等场景。"
+description: "向另一个 ARISC 项目的 tmux-backed Codex 会话发送指令。用于用户说“告诉 <slug> 干啥”、“send to <slug>”、“指挥那个 agent”、“让 <slug> 做 X”、“broadcast”等场景。"
 argument-hint: "<slug> <message...> [--dry-run]"
 allowed-tools: Bash(arisc *)
 ---

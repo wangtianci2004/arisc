@@ -38,9 +38,9 @@ init_bundled_repo() {
 }
 
 update_bundled_repo() {
-  echo "  -> 更新根目录 ARIS skills submodule"
+  echo "  -> 同步 ARISC 记录的固定 submodule 版本"
   git -C "$WORKSPACE_ROOT" submodule sync -- "$BUNDLED_PATH"
-  git -C "$WORKSPACE_ROOT" submodule update --init --remote --checkout --recursive -- "$BUNDLED_PATH"
+  git -C "$WORKSPACE_ROOT" submodule update --init --checkout --recursive -- "$BUNDLED_PATH"
 }
 
 print_status() {

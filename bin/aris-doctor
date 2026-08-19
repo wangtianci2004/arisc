@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# aris-doctor：检查 ARIS-Codex 工作区、项目和外部工具。
+# aris-doctor：检查 ARISC 工作区、项目和外部工具。
 set -euo pipefail
 
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
@@ -19,7 +19,7 @@ usage() {
 用法：arisc doctor [--json]
 
 作用：
-  检查 ARIS-Codex 工作区、项目骨架、base 环境、ARIS_REPO 和外部工具。
+  检查 ARISC 工作区、项目骨架、base 环境、ARIS_REPO 和外部工具。
 
 选项：
   --json  输出机器可读 JSON

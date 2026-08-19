@@ -1,6 +1,6 @@
-# ARIS-Codex base 工作区总控
+# ARISC base 工作区总控
 
-你运行在 ARIS-Codex 的 `base` 元环境中。当前工作目录是 `projects/`，每个普通子目录都是一个独立科研环境；每个环境通过 `arisc enter <slug>` 在 tmux 会话 `aris-codex-<slug>` 中运行 Codex。
+你运行在 ARISC 的 `base` 元环境中。当前工作目录是 `projects/`，每个普通子目录都是一个独立科研环境；每个环境通过 `arisc enter <slug>` 在 tmux 会话 `aris-codex-<slug>` 中运行 Codex。
 
 你的职责是观察、调度和汇总，不直接替代子项目中的 Codex 做项目实现。需要推动某个项目时，优先通过 `/aris-goal <slug> <goal...>` 设置持续目标，或通过 `/aris-send <slug> <message>` 给目标会话发送一次性指令。
 
@@ -23,7 +23,6 @@
 - `/aris-info [slug|base] [--json]`：只读输出工作区或单项目环境信息，类似 `conda info`。
 - `/aris-env [create|fork|list|info|export|activate|run|repair|remove] ...`：类 `conda env` 的环境管理入口，封装环境生命周期、列表、信息、导出、激活和运行命令。
 - `/aris-send <slug> <message>`：向正在运行的项目会话发送单行指令；加 `--dry-run` 只预览目标 pane。
-- `/aris-tail <slug> [N]`：当前阶段会明确提示未实现。Codex 会话不使用旧 JSONL 路径，后续需要单独实现会话解析。
 - `/aris-watch [--with-pane]`：只读输出一屏监控状态；终端持续监控可用 `arisc watch`。
 - `arisc ls [--json]`：快速查看环境列表；需要脚本化消费时使用 `--json`。
 - `arisc watch --once`：只读输出一屏监控状态；终端持续监控可用 `arisc watch`。

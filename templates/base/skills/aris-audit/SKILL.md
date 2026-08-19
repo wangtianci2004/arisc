@@ -1,6 +1,6 @@
 ---
 name: aris-audit
-description: "只读审计 ARIS-Codex CLI、文档和 base 技能是否同步。用于用户说“检查命令完整性”、“审计 arisc”、“看看有没有漏文档或技能入口”等场景。"
+description: "只读审计 ARISC CLI、文档和 base 技能是否同步。用于用户说“检查命令完整性”、“审计 arisc”、“看看有没有漏文档或技能入口”等场景。"
 argument-hint: "[--json]"
 allowed-tools: Bash(arisc *)
 ---

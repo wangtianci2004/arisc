@@ -1,6 +1,6 @@
 ---
 name: aris-env
-description: "类 conda env 的 ARIS-Codex 环境管理入口。用于用户说“创建环境”、“fork 环境”、“列环境”、“环境信息”、“导出环境”、“激活环境”、“在环境里运行命令”等场景。"
+description: "类 conda env 的 ARISC 环境管理入口。用于用户说“创建环境”、“fork 环境”、“列环境”、“环境信息”、“导出环境”、“激活环境”、“在环境里运行命令”等场景。"
 argument-hint: "[create|fork|list|info|export|activate|run|repair|remove] ..."
 allowed-tools: Bash(arisc *)
 ---

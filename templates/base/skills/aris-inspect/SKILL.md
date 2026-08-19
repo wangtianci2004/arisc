@@ -1,6 +1,6 @@
 ---
 name: aris-inspect
-description: "只读诊断单个 ARIS-Codex 项目。用于用户点名某个项目并问“看看这个项目”、“诊断一下 <slug>”、“这个项目卡在哪里”、“inspect <slug>”等场景。"
+description: "只读诊断单个 ARISC 项目。用于用户点名某个项目并问“看看这个项目”、“诊断一下 <slug>”、“这个项目卡在哪里”、“inspect <slug>”等场景。"
 argument-hint: "<slug> [--json] [--with-pane] [--pane-lines N] [--embed]"
 allowed-tools: Bash(arisc *)
 ---

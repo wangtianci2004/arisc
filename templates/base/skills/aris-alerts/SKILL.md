@@ -1,6 +1,6 @@
 ---
 name: aris-alerts
-description: "只读列出 ARIS-Codex 中需要人工关注的项目。用于用户说“哪些需要处理”、“哪里卡住了”、“show alerts”、“阻塞项目”、“需要我接管吗”等场景。"
+description: "只读列出 ARISC 中需要人工关注的项目。用于用户说“哪些需要处理”、“哪里卡住了”、“show alerts”、“阻塞项目”、“需要我接管吗”等场景。"
 argument-hint: "[--summary] [--json] [--sort severity|name] [--only blocked|attention|waiting|stopped] [--pane-lines N]"
 allowed-tools: Bash(arisc *)
 ---

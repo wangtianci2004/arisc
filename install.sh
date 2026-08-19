@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh：在当前机器上初始化 ARIS-Codex 工作区。
+# install.sh：在当前机器上初始化 ARISC 工作区。
 
 if (( BASH_VERSINFO[0] < 4 )); then
   if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -41,7 +41,7 @@ while [[ $# -gt 0 ]]; do
 用法：install.sh [options]
 
 作用：
-  初始化当前 ARIS-Codex 工作区：
+  初始化当前 ARISC 工作区：
   - 创建 projects/ 和 shared/
   - 注册全局 arisc -> 当前工作区 bin/arisc
   - 注册全局 arisc 命令
@@ -69,7 +69,7 @@ EOF
   shift
 done
 
-echo "[INFO] 安装 ARIS-Codex 工作区：$WORKSPACE_ROOT"
+echo "[INFO] 安装 ARISC 工作区：$WORKSPACE_ROOT"
 
 mkdir -p "$WORKSPACE_ROOT/projects" "$WORKSPACE_ROOT/shared"
 echo "[INFO] 已确保 projects/ shared/"
@@ -178,7 +178,7 @@ fi
 
 cat <<EOF
 
-[OK] ARIS-Codex 已安装：$WORKSPACE_ROOT
+[OK] ARISC 已安装：$WORKSPACE_ROOT
 
 下一步：
   exec \$SHELL -l
@@ -188,4 +188,7 @@ cat <<EOF
 
 填写本机密钥：
   \$EDITOR $WORKSPACE_ROOT/shared/env
+
+卸载：
+  $WORKSPACE_ROOT/uninstall.sh --keep-data
 EOF

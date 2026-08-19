@@ -1,6 +1,6 @@
 ---
 name: aris-auto
-description: "投递 ARIS-Codex /goal 后立即输出 base 监控摘要，可选保存 base 接管快照或输出接管摘要 JSON。用于用户说“一条命令自动干”、“让项目自动推进并监控”、“自动推进并保存快照”、“批量自动推进项目”等场景。"
+description: "投递 ARISC /goal 后立即输出 base 监控摘要，可选保存 base 接管快照或输出接管摘要 JSON。用于用户说“一条命令自动干”、“让项目自动推进并监控”、“自动推进并保存快照”、“批量自动推进项目”等场景。"
 argument-hint: "[--no-monitor] [--with-pane] [--pane-lines N] [--no-agenda] [--snapshot] [--summary] [--summary-json] [--summary-json-only] <slug> [goal options] -- <goal...> | --batch FILE|- [goal batch options]"
 allowed-tools: Bash(arisc *)
 ---

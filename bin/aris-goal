@@ -464,7 +464,7 @@ status_alerts_summary() {
     fi
   done < <(project_slugs)
 
-  echo "# ARIS-Codex 告警摘要"
+  echo "# ARISC 告警摘要"
   echo ""
   echo "- 生成时间：$(date '+%Y-%m-%dT%H:%M:%S%z')"
   echo "- 工作区：$WORKSPACE_ROOT"

@@ -1,6 +1,6 @@
 ---
 name: aris-triage
-description: "只读汇总 ARIS-Codex 中需要人工关注的项目，并逐个生成接管诊断。用于用户说“帮我接管前看一下”、“哪些项目要处理并给诊断”、“triage”、“先排查告警项目”等场景。"
+description: "只读汇总 ARISC 中需要人工关注的项目，并逐个生成接管诊断。用于用户说“帮我接管前看一下”、“哪些项目要处理并给诊断”、“triage”、“先排查告警项目”等场景。"
 argument-hint: "[--only blocked|attention|waiting|stopped] [--sort severity|name] [--with-pane] [--pane-lines N] [--json] [--save] [--out FILE] [--embed]"
 allowed-tools: Bash(arisc *)
 ---

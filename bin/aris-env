@@ -97,7 +97,7 @@ env_export() {
   arisc env export [--json] [--save] [--out FILE] <slug|base>
   arisc env export --all [--json] [--save] [--out FILE]
 
-只读导出 ARIS-Codex 环境清单。不会输出项目 .env 内容，不启动 Codex，不发送消息。
+只读导出 ARISC 环境清单。不会输出项目 .env 内容，不启动 Codex，不发送消息。
 EOF
         exit 0
         ;;
@@ -146,7 +146,7 @@ EOF
         printf ']}\n'
       }
     else
-      echo "# ARIS-Codex 全环境导出"
+      echo "# ARISC 全环境导出"
       echo ""
       echo "- 生成时间：$generated_all"
       echo "- 工作区：$WORKSPACE_ROOT"
@@ -262,7 +262,7 @@ EOF
   }
 
   render_export_text() {
-    echo "# ARIS-Codex 环境导出"
+    echo "# ARISC 环境导出"
     echo ""
     echo "- 生成时间：$generated_at"
     echo "- 环境：$target"

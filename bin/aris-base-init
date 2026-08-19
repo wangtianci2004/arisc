@@ -40,6 +40,20 @@ fi
 
 BASE_TEMPLATE_SKILLS="$TEMPLATES_DIR/skills"
 if [[ -d "$BASE_TEMPLATE_SKILLS" ]]; then
+  for dst in "$BASE_SKILLS"/aris-*; do
+    [[ -L "$dst" ]] || continue
+    target="$(readlink "$dst")"
+    case "$target" in
+      "$BASE_TEMPLATE_SKILLS"/*)
+        name="$(basename "$dst")"
+        if [[ ! -d "$BASE_TEMPLATE_SKILLS/$name" ]]; then
+          rm -f "$dst"
+          echo "[INFO] - stale base/$name"
+        fi
+        ;;
+    esac
+  done
+
   for s in "$BASE_TEMPLATE_SKILLS"/*/; do
     [[ -d "$s" ]] || continue
     name=$(basename "$s")

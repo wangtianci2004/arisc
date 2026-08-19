@@ -2,6 +2,8 @@
 
 将下面的提示词完整复制给具备终端操作能力的 Agent。它会先识别和备份本地研究数据，再移除 ARISC 命令、shell 配置、后台会话、根目录 submodule 与工作区。
 
+ARISC 同时提供确定性的 `~/arisc/uninstall.sh`。Agent 应先完成路径与数据检查，再根据用户选择调用 `--keep-data`、`--backup DIR` 或 `--purge`，而不是自行拼接宽泛删除命令。
+
 ```text
 请帮我从当前设备安全、完整地卸载 ARISC。先检查和展示计划，得到我的明确确认后再执行删除，不要只给我卸载教程。
 
@@ -32,6 +34,11 @@ ARISC 默认目录：
    A. 备份后卸载（推荐）；
    B. 保留数据目录，仅移除命令和 shell 配置；
    C. 永久删除全部 ARISC 数据。
+
+   确认后优先调用对应命令：
+   - A：`~/arisc/uninstall.sh --keep-data --yes`
+   - B：`~/arisc/uninstall.sh --backup <确认的目录> --yes`
+   - C：`~/arisc/uninstall.sh --purge --yes`
 
 3. 如果选择 A：
    - 在 $HOME 下创建带时间戳的备份目录，例如 $HOME/arisc-backup-YYYYMMDD-HHMMSS；

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# aris-status：只读输出 ARIS-Codex 工作区一屏状态。
+# aris-status：只读输出 ARISC 工作区一屏状态。
 set -euo pipefail
 
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
@@ -19,7 +19,7 @@ usage() {
 用法：arisc status [--json] [--with-pane] [--pane-lines N]
 
 作用：
-  只读输出一屏 ARIS-Codex 工作区状态。它等价于 arisc watch --once，
+  只读输出一屏 ARISC 工作区状态。它等价于 arisc watch --once，
   适合在普通终端快速查看环境列表、goal 状态、告警摘要、需要关注项目和 tmux 会话。
 
 选项：

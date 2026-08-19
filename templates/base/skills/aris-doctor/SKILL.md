@@ -1,6 +1,6 @@
 ---
 name: aris-doctor
-description: "只读检查 ARIS-Codex 工作区、项目骨架、base 环境、ARIS_REPO 和外部工具。用于用户说“检查环境”、“doctor”、“运行骨架有没有问题”、“工具链是否可用”等场景。"
+description: "只读检查 ARISC 工作区、项目骨架、base 环境、ARIS_REPO 和外部工具。用于用户说“检查环境”、“doctor”、“运行骨架有没有问题”、“工具链是否可用”等场景。"
 argument-hint: "[--json]"
 allowed-tools: Bash(arisc *)
 ---

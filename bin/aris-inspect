@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# aris-inspect：只读诊断单个 ARIS-Codex 项目。
+# aris-inspect：只读诊断单个 ARISC 项目。
 set -euo pipefail
 
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
@@ -26,7 +26,7 @@ usage() {
   arisc inspect base [--json] [--with-pane] [--pane-lines N] [--embed]
 
 作用：
-  只读诊断一个 ARIS-Codex 环境，汇总项目路径、骨架、goal、tmux、Git 和可选 pane 摘要。
+  只读诊断一个 ARISC 环境，汇总项目路径、骨架、goal、tmux、Git 和可选 pane 摘要。
 
 选项：
   --json          输出机器可读 JSON
@@ -289,7 +289,7 @@ render_text() {
   if $EMBED; then
     heading="###"
   else
-    echo "# ARIS-Codex 项目诊断"
+    echo "# ARISC 项目诊断"
     echo ""
   fi
   echo "- 生成时间：$GENERATED_AT"

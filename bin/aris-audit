@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# aris-audit：只读审计 ARIS-Codex CLI、文档和 base 技能是否同步。
+# aris-audit：只读审计 ARISC CLI、文档和 base 技能是否同步。
 set -euo pipefail
 
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
@@ -10,13 +10,13 @@ GENERATED_AT="$(date '+%Y-%m-%dT%H:%M:%S%z')"
 JSON=false
 
 COMMANDS=(
-  new fork goal auto base status alerts agenda triage report reports watch info inspect env repair activate run send tail
-  ls enter del restore rename path repo update doctor purge happy base-init audit
+  new fork goal auto base status alerts agenda triage report reports watch info inspect env repair activate run send
+  ls enter del restore rename path repo update doctor purge base-init audit completion
 )
 
 BASE_SKILLS=(
   aris-activate aris-agenda aris-alerts aris-audit aris-auto aris-base aris-doctor aris-env aris-goal aris-info aris-inspect aris-report aris-reports aris-run aris-triage
-  aris-send aris-status aris-tail aris-watch
+  aris-send aris-status aris-watch
 )
 
 ENV_SUBCOMMANDS=(
@@ -36,7 +36,7 @@ usage() {
 用法：arisc audit [--json]
 
 作用：
-	  只读审计 ARIS-Codex 工作区自身是否一致：
+	  只读审计 ARISC 工作区自身是否一致：
 	  - 全局 arisc 是否指向当前 ARISC workspace
 	  - bin/aris-* 子命令是否存在、可执行、语法通过
 	  - arisc 分发器是否包含这些子命令
@@ -132,7 +132,7 @@ check_docs() {
   has_text "$WORKSPACE_ROOT/install.sh" 'GLOBAL_ARISC="$USER_BIN/arisc"' || add_issue "install" "global arisc" "install.sh 未注册全局 arisc"
   has_text "$WORKSPACE_ROOT/.gitmodules" 'path = aris-codex-skills' || add_issue "submodule" "path" ".gitmodules 未声明根目录 aris-codex-skills"
   has_text "$WORKSPACE_ROOT/.gitmodules" 'https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep.git' || add_issue "submodule" "url" ".gitmodules 未指向官方 ARIS 仓库"
-  has_text "$SCRIPT_DIR/aris-update" 'submodule update --init --remote --checkout --recursive' || add_issue "submodule" "update" "arisc update 未更新根目录 submodule"
+  has_text "$SCRIPT_DIR/aris-update" 'submodule update --init --checkout --recursive' || add_issue "submodule" "update" "arisc update 未同步根目录 submodule"
 
   arisc_help="$("$SCRIPT_DIR/arisc" help)"
   for cmd in "${COMMANDS[@]}"; do
@@ -276,7 +276,7 @@ render_records_json() {
 }
 
 render_text() {
-  echo "# ARIS-Codex 审计"
+  echo "# ARISC 审计"
   echo ""
   echo "- 生成时间：$GENERATED_AT"
   echo "- 工作区：$WORKSPACE_ROOT"

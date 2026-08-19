@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# aris-watch：只读刷新 ARIS-Codex 工作区运行状态。
+# aris-watch：只读刷新 ARISC 工作区运行状态。
 set -euo pipefail
 
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
@@ -17,7 +17,7 @@ usage() {
   cat >&2 <<'EOF'
 用法：arisc watch [--once] [--interval N] [--with-pane] [--pane-lines N] [--no-clear]
 
-只读刷新 ARIS-Codex 工作区状态，适合在 base 之外的终端持续监控。
+只读刷新 ARISC 工作区状态，适合在 base 之外的终端持续监控。
 
 选项：
   --once          只输出一次，不循环
@@ -179,7 +179,7 @@ alert_summary() {
 }
 
 snapshot() {
-  echo "# ARIS-Codex 运行监控"
+  echo "# ARISC 运行监控"
   echo ""
   echo "- 生成时间：$(date '+%Y-%m-%dT%H:%M:%S%z')"
   echo "- 工作区：$WORKSPACE_ROOT"
@@ -194,7 +194,7 @@ snapshot() {
   run_section "Goal 状态" "$SCRIPT_DIR/aris-goal" --status
   run_section "告警摘要" alert_summary
   run_section "需要关注" "$SCRIPT_DIR/aris-alerts"
-  run_section "运行中的 ARIS-Codex tmux 会话" tmux_sessions
+  run_section "运行中的 ARISC tmux 会话" tmux_sessions
   if $WITH_PANE; then
     run_section "运行中 pane 摘要" pane_summary
   fi

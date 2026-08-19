@@ -1,6 +1,6 @@
 ---
 name: aris-info
-description: "只读输出 ARIS-Codex 工作区或单项目环境信息。用于用户说“环境信息”、“workspace info”、“这个环境详情”、“像 conda info 一样看一下”等场景。"
+description: "只读输出 ARISC 工作区或单项目环境信息。用于用户说“环境信息”、“workspace info”、“这个环境详情”、“像 conda info 一样看一下”等场景。"
 argument-hint: "[--json] [slug|base]"
 allowed-tools: Bash(arisc *)
 ---

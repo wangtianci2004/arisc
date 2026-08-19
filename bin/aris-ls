@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# aris-ls：列出 ARIS-Codex 工作区中的环境状态。
+# aris-ls：列出 ARISC 工作区中的环境状态。
 set -euo pipefail
 
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
@@ -16,7 +16,7 @@ usage() {
 用法：arisc ls [--json]
 
 作用：
-  列出 ARIS-Codex 工作区中的 base 和所有普通项目，包含阶段、tmux 状态、
+  列出 ARISC 工作区中的 base 和所有普通项目，包含阶段、tmux 状态、
   最近 goal 摘要和研究简报标题。
 
 选项：

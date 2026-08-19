@@ -68,6 +68,9 @@ export PATH="$FAKE_BIN:$TEST_HOME/.local/bin:$PATH"
 export ARISC_TEST_REAL_GIT="$REAL_GIT_BIN"
 unset WORKSPACE_ROOT ARIS_REPO
 
+mkdir -p "$WORKSPACE/projects/.agents/skills"
+ln -s "$WORKSPACE/templates/base/skills/aris-tail" "$WORKSPACE/projects/.agents/skills/aris-tail"
+
 INSTALL_ARGS=(--yes --no-path --skip-doctor)
 if [[ -n "${ARISC_TEST_UPSTREAM_REPO:-}" ]]; then
   INSTALL_ARGS+=(--repo-path "$TEST_REPO")
@@ -75,6 +78,7 @@ fi
 "$WORKSPACE/install.sh" "${INSTALL_ARGS[@]}"
 
 [[ -L "$TEST_HOME/.local/bin/arisc" ]]
+[[ ! -L "$WORKSPACE/projects/.agents/skills/aris-tail" ]]
 [[ ! -e "$TEST_HOME/.local/bin/aris" ]]
 [[ ! -e "$WORKSPACE/bin/aris" ]]
 [[ -f "$WORKSPACE/config" ]]

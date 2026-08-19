@@ -121,7 +121,7 @@ fi
 echo "[INFO] 初始化项目 Git 仓库"
 git init -q
 git add .gitignore RESEARCH_BRIEF.md pyproject.toml AGENTS.md
-git -c user.email=aris@local -c user.name=aris commit -q -m "初始化 ARIS-Codex 项目骨架" 2>/dev/null || true
+git -c user.email=aris@local -c user.name=aris commit -q -m "初始化 ARISC 项目骨架" 2>/dev/null || true
 
 cat <<EOF
 
@@ -135,7 +135,7 @@ cat <<EOF
 tmux：
   Ctrl+B D                  从 tmux 分离，Codex 会继续在后台运行
   arisc enter $SLUG         重新连接会话
-  arisc enter --list        查看运行中的 ARIS-Codex 会话
+  arisc enter --list        查看运行中的 ARISC 会话
   arisc enter --kill $SLUG  结束后台会话
 
 清理：

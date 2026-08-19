@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# aris-completion：输出 arisc 的 Bash/Zsh completion。
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'EOF'
+用法：arisc completion <bash|zsh>
+
+示例：
+  source <(arisc completion bash)
+  source <(arisc completion zsh)
+EOF
+  exit "${1:-2}"
+}
+
+[[ $# -eq 1 ]] || usage 2
+
+case "$1" in
+  bash)
+    cat <<'EOF'
+_arisc() {
+  local cur prev commands project_commands
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  prev="${COMP_WORDS[COMP_CWORD-1]}"
+  commands="new fork goal auto base status alerts agenda triage report reports watch info inspect env repair activate run send ls enter del restore rename path repo update doctor audit purge base-init completion help version"
+  project_commands="goal auto info inspect repair activate run send enter del restore path"
+
+  if [[ $COMP_CWORD -eq 1 ]]; then
+    COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+    return
+  fi
+
+  if [[ " $project_commands " == *" ${COMP_WORDS[1]} "* ]] && command -v jq >/dev/null 2>&1; then
+    local projects
+    projects="$(arisc ls --json 2>/dev/null | jq -r '.items[] | select(.type == "project") | .name' 2>/dev/null || true)"
+    COMPREPLY=( $(compgen -W "$projects" -- "$cur") )
+    return
+  fi
+
+  case "${COMP_WORDS[1]}" in
+    completion) COMPREPLY=( $(compgen -W "bash zsh" -- "$cur") ) ;;
+    alerts|agenda|triage) COMPREPLY=( $(compgen -W "--only --sort --json --summary --with-pane --pane-lines" -- "$cur") ) ;;
+    update) COMPREPLY=( $(compgen -W "--repo-only --projects-only" -- "$cur") ) ;;
+    *) COMPREPLY=() ;;
+  esac
+}
+complete -F _arisc arisc
+EOF
+    ;;
+  zsh)
+    cat <<'EOF'
+#compdef arisc
+
+_arisc_projects() {
+  local -a projects
+  projects=(${(f)"$(arisc ls --json 2>/dev/null | jq -r '.items[] | select(.type == "project") | .name' 2>/dev/null)"})
+  _describe 'ARISC project' projects
+}
+
+_arisc() {
+  local -a commands
+  commands=(
+    'new:create a research project'
+    'fork:import an existing research project'
+    'goal:send a goal to a project agent'
+    'auto:send a goal and show control summary'
+    'base:manage the base control environment'
+    'status:show workspace status'
+    'alerts:show projects needing attention'
+    'agenda:build a takeover agenda'
+    'triage:diagnose projects needing attention'
+    'report:generate a handoff report'
+    'reports:browse saved reports'
+    'watch:watch workspace state'
+    'info:show workspace or project information'
+    'inspect:inspect one project'
+    'env:manage project environments'
+    'repair:repair project scaffolding'
+    'activate:activate a project environment'
+    'run:run a command in a project environment'
+    'send:send a message to a running project'
+    'ls:list projects'
+    'enter:enter a project or base session'
+    'del:soft-delete a project'
+    'restore:restore a project'
+    'rename:rename a project'
+    'path:print a project path'
+    'repo:manage the bundled ARIS repository'
+    'update:synchronize pinned skills and projects'
+    'doctor:check workspace health'
+    'audit:audit ARISC consistency'
+    'purge:purge old trash entries'
+    'completion:print shell completion'
+  )
+  _describe 'ARISC command' commands
+}
+
+compdef _arisc arisc
+EOF
+    ;;
+  --help|-h|help) usage 0 ;;
+  *) echo "[ERROR] 不支持的 shell：$1" >&2; usage 2 ;;
+esac

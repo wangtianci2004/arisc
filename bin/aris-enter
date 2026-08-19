@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# aris-enter：为每个 ARIS-Codex 环境管理一个 tmux 后台会话。
+# aris-enter：为每个 ARISC 环境管理一个 tmux 后台会话。
 set -euo pipefail
 
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
@@ -83,7 +83,6 @@ usage() {
 
 参数：
   --new          强制启动新的 Codex 会话，不自动 resume
-  --happy        ARIS-Codex 暂不支持 happy，传入时会明确报错
   --list         列出运行中的 aris-codex tmux 会话
   --kill <slug>  结束指定 tmux 会话；Codex 全局会话历史不移动
 
@@ -171,10 +170,6 @@ CODEX_ARGS=()
 for arg in "$@"; do
   case "$arg" in
     --new) NEW_SESSION=true ;;
-    --happy)
-      echo "[ERROR] ARIS-Codex 暂不支持 happy；请使用：arisc enter $SLUG" >&2
-      exit 2
-      ;;
     *) CODEX_ARGS+=("$arg") ;;
   esac
 done

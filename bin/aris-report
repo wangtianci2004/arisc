@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# aris-report：生成 ARIS-Codex 工作区只读交接报告。
+# aris-report：生成 ARISC 工作区只读交接报告。
 set -euo pipefail
 
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
@@ -26,7 +26,7 @@ usage() {
 生成只读交接报告，汇总项目列表、goal 状态、需要关注的项目、tmux 会话、项目 Git 状态和 doctor 结果。
 
 选项：
-  --with-pane      附加每个运行中 ARIS-Codex tmux pane 的末尾摘要，默认不输出 pane 内容
+  --with-pane      附加每个运行中 ARISC tmux pane 的末尾摘要，默认不输出 pane 内容
   --with-agenda    附加 arisc agenda 接管议程，默认只列出 alerts 概览
   --with-triage    附加 arisc triage 接管诊断，默认只列出 alerts 概览
   --pane-lines N   每个 pane 摘要的行数，默认 8；仅在 --with-pane 时生效
@@ -301,7 +301,7 @@ REPORT_CMD_STR="${REPORT_CMD_STR# }"
 
 render_report() {
 cat <<EOF
-# ARIS-Codex 交接报告
+# ARISC 交接报告
 
 - 生成时间：$(date '+%Y-%m-%dT%H:%M:%S%z')
 - 工作区：$WORKSPACE_ROOT
@@ -318,7 +318,7 @@ fi
 if $WITH_TRIAGE; then
   run_section "接管诊断" triage_summary
 fi
-run_section "运行中的 ARIS-Codex tmux 会话" tmux_sessions
+run_section "运行中的 ARISC tmux 会话" tmux_sessions
 run_section "项目 Git 状态" project_git_summary
 
 if $WITH_PANE; then

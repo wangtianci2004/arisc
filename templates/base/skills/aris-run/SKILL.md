@@ -1,6 +1,6 @@
 ---
 name: aris-run
-description: "在指定 ARIS-Codex 项目环境中执行普通命令。用于用户说“在某个项目里跑一下命令”、“用项目 venv 执行”、“像 conda run 一样运行脚本”等场景。"
+description: "在指定 ARISC 项目环境中执行普通命令。用于用户说“在某个项目里跑一下命令”、“用项目 venv 执行”、“像 conda run 一样运行脚本”等场景。"
 argument-hint: "[--no-env] [--no-venv] [--dry-run] <slug> -- <command...>"
 allowed-tools: Bash(arisc *)
 ---

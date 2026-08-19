@@ -1,11 +1,11 @@
 ---
 name: aris-status
-description: "查看 ARIS-Codex 工作区的跨项目状态。用于用户说“全局状态”、“看一下所有环境”、“all projects”、“workspace status”、“who is working on what”等场景。"
+description: "查看 ARISC 工作区的跨项目状态。用于用户说“全局状态”、“看一下所有环境”、“all projects”、“workspace status”、“who is working on what”等场景。"
 argument-hint: "[--json] [--with-pane] [--pane-lines N]"
 allowed-tools: Bash(arisc *)
 ---
 
-# ARIS-Codex 工作区状态
+# ARISC 工作区状态
 
 从 base 环境运行。目标是输出项目总览、ARIS goal 状态、告警摘要、需要关注项目和运行中的 tmux 会话。
 

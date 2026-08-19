@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# aris-restore：从 .trash/ 恢复 ARIS-Codex 项目。
+# aris-restore：从 .trash/ 恢复 ARISC 项目。
 set -euo pipefail
 
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"

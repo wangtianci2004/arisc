@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# aris-del：软删除 ARIS-Codex 项目，并结束对应 tmux 会话。
+# aris-del：软删除 ARISC 项目，并结束对应 tmux 会话。
 set -euo pipefail
 
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
