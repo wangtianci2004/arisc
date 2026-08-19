@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# aris-base-init：初始化 Codex 版 base 元环境。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+PROJECTS_DIR="$WORKSPACE_ROOT/projects"
+TEMPLATES_DIR="$WORKSPACE_ROOT/templates/base"
+
+FORCE_TEMPLATES=false
+for arg in "$@"; do
+  case "$arg" in
+    --force-templates) FORCE_TEMPLATES=true ;;
+    --help|-h)
+      sed -n '2,40p' "${BASH_SOURCE[0]}" | sed -E 's/^# ?//'
+      exit 0
+      ;;
+    *) echo "[ERROR] 未知参数：$arg" >&2; exit 2 ;;
+  esac
+done
+
+BASE_CODEX="$PROJECTS_DIR/.codex"
+BASE_SKILLS="$PROJECTS_DIR/.agents/skills"
+mkdir -p "$BASE_CODEX" "$BASE_SKILLS"
+
+cat > "$BASE_CODEX/aris.env" <<EOF
+ARIS_ENV_NAME="base"
+ARIS_WORKSPACE_ROOT="$WORKSPACE_ROOT"
+ARIS_PROJECTS_DIR="$PROJECTS_DIR"
+EOF
+
+if [[ -f "$TEMPLATES_DIR/AGENTS.md" ]]; then
+  dst="$PROJECTS_DIR/AGENTS.md"
+  if [[ ! -e "$dst" || "$FORCE_TEMPLATES" == true ]]; then
+    cp "$TEMPLATES_DIR/AGENTS.md" "$dst"
+    echo "[INFO] + AGENTS.md"
+  fi
+else
+  echo "[WARN] $TEMPLATES_DIR/AGENTS.md 不存在，跳过 base 指令模板" >&2
+fi
+
+BASE_TEMPLATE_SKILLS="$TEMPLATES_DIR/skills"
+if [[ -d "$BASE_TEMPLATE_SKILLS" ]]; then
+  for s in "$BASE_TEMPLATE_SKILLS"/*/; do
+    [[ -d "$s" ]] || continue
+    name=$(basename "$s")
+    dst="$BASE_SKILLS/$name"
+    if [[ -e "$dst" && ! -L "$dst" ]]; then
+      echo "[WARN] 跳过 base 技能 ${name}：目标不是符号链接：$dst" >&2
+      continue
+    fi
+    if [[ ! -L "$dst" || "$(readlink "$dst")" != "${s%/}" ]]; then
+      ln -sfn "${s%/}" "$dst"
+      echo "[INFO] ~ base/$name"
+    fi
+  done
+fi
+
+SHARED_SKILLS="$WORKSPACE_ROOT/shared/skills"
+if [[ -d "$SHARED_SKILLS" ]]; then
+  for s in "$SHARED_SKILLS"/*/; do
+    [[ -d "$s" ]] || continue
+    name=$(basename "$s")
+    dst="$BASE_SKILLS/$name"
+    if [[ -e "$dst" && ! -L "$dst" ]]; then
+      echo "[WARN] 跳过共享技能 ${name}：目标不是符号链接：$dst" >&2
+      continue
+    fi
+    if [[ ! -L "$dst" || "$(readlink "$dst")" != "${s%/}" ]]; then
+      ln -sfn "${s%/}" "$dst"
+      echo "[INFO] ~ shared/$name"
+    fi
+  done
+fi
+
+echo "[OK] base 已就绪：${BASE_CODEX}；进入方式：arisc enter base"

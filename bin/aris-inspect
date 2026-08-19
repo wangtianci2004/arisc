@@ -1,0 +1,441 @@
+#!/usr/bin/env bash
+# aris-inspect：只读诊断单个 ARIS-Codex 项目。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+TMUX_PREFIX="aris-codex"
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/arisc-platform.sh
+source "$SCRIPT_DIR/../lib/arisc-platform.sh"
+SLUG_RE='^[a-z0-9]+(-[a-z0-9]+)*$'
+GIT_TIMEOUT="${ARIS_INSPECT_GIT_TIMEOUT:-5}"
+
+JSON=false
+WITH_PANE=false
+PANE_LINES=20
+EMBED=false
+
+ISSUES=()
+WARNINGS=()
+
+usage() {
+  local code="${1:-2}"
+  cat >&2 <<'EOF'
+用法：
+  arisc inspect <slug> [--json] [--with-pane] [--pane-lines N] [--embed]
+  arisc inspect base [--json] [--with-pane] [--pane-lines N] [--embed]
+
+作用：
+  只读诊断一个 ARIS-Codex 环境，汇总项目路径、骨架、goal、tmux、Git 和可选 pane 摘要。
+
+选项：
+  --json          输出机器可读 JSON
+  --with-pane     附加目标 tmux pane 末尾摘要，默认不输出
+  --pane-lines N  pane 摘要行数，默认 20；仅在 --with-pane 时生效
+  --embed         省略顶层标题，供 arisc triage 嵌入使用
+
+说明：
+  本命令不创建项目、不启动 Codex、不发送消息、不结束会话。
+EOF
+  exit "$code"
+}
+
+json_escape() {
+  local s="${1:-}"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\b'/\\b}
+  s=${s//$'\f'/\\f}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+add_issue() {
+  ISSUES+=("$1")
+}
+
+add_warning() {
+  WARNINGS+=("$1")
+}
+
+canonical_dir() {
+  (cd "$1" 2>/dev/null && pwd -P) || return 1
+}
+
+pane_target() {
+  printf '=%s:0.0\n' "$1"
+}
+
+read_state_field() {
+  local file="$1" key="$2"
+  [[ -f "$file" ]] || return 0
+  sed -n "s/^${key}	//p" "$file" | head -1
+}
+
+capture_git() {
+  local out_var="$1" proj="$2" out code
+  shift 2
+  set +e
+  out="$(arisc_run_with_timeout "$GIT_TIMEOUT" git -C "$proj" "$@" 2>/dev/null)"
+  code=$?
+  set -e
+  printf -v "$out_var" '%s' "$out"
+  return "$code"
+}
+
+classify_pane() {
+  local pane_text="$1"
+  if [[ -z "$pane_text" ]]; then
+    echo "blank"
+  elif printf '%s\n' "$pane_text" | grep -Eiq 'Goal blocked|blocked \(/goal|目标阻塞|已阻塞'; then
+    echo "blocked"
+  elif printf '%s\n' "$pane_text" | grep -Eiq 'Reconnecting|Stream disconnected|rate limit|network|连接中断|重连'; then
+    echo "attention"
+  elif printf '%s\n' "$pane_text" | grep -Eiq 'error|failed|exception|traceback|panic|失败|错误|异常'; then
+    echo "attention"
+  elif printf '%s\n' "$pane_text" | grep -Eiq 'Pursuing goal|esc to interrupt|Updated Plan|Exploring|Running|Thinking|正在|执行中'; then
+    echo "running"
+  elif printf '%s\n' "$pane_text" | grep -Eiq 'approval required|approve\?|allow\?|confirm\?|press enter|y/n|yes/no|是否继续|确认执行|允许执行|等待确认|批准'; then
+    echo "waiting"
+  else
+    echo "active"
+  fi
+}
+
+check_path() {
+  local label="$1" path="$2" required="${3:-true}"
+  if [[ -e "$path" ]]; then
+    printf '[OK] %s\n' "$label"
+    return 0
+  fi
+  if [[ -L "$path" ]]; then
+    printf '[WARN] %s：符号链接悬空 -> %s\n' "$label" "$(readlink "$path")"
+    return 0
+  fi
+  if [[ "$required" == "true" ]]; then
+    printf '[WARN] %s：缺失\n' "$label"
+  else
+    printf '[INFO] %s：不存在\n' "$label"
+  fi
+}
+
+collect_path_status() {
+  local label="$1" path="$2" required="${3:-true}"
+  if [[ -e "$path" ]]; then
+    return 0
+  fi
+  if [[ -L "$path" ]]; then
+    add_warning "$label 符号链接悬空 -> $(readlink "$path")"
+    return 0
+  fi
+  if [[ "$required" == "true" ]]; then
+    add_warning "$label 缺失"
+  fi
+}
+
+collect_skeleton_status() {
+  if ! $EXISTS; then
+    return 0
+  fi
+  if $IS_BASE; then
+    collect_path_status "projects/.codex" "$PROJECT_DIR/.codex"
+    collect_path_status "projects/.agents/skills" "$PROJECT_DIR/.agents/skills"
+    collect_path_status "projects/AGENTS.md" "$PROJECT_DIR/AGENTS.md"
+    return 0
+  fi
+
+  collect_path_status ".env" "$PROJECT_DIR/.env"
+  collect_path_status ".mcp.json" "$PROJECT_DIR/.mcp.json"
+  collect_path_status ".venv/" "$PROJECT_DIR/.venv"
+  collect_path_status ".codex/" "$PROJECT_DIR/.codex"
+  collect_path_status ".agents/skills/" "$PROJECT_DIR/.agents/skills"
+  collect_path_status ".aris/installed-skills-codex.txt" "$PROJECT_DIR/.aris/installed-skills-codex.txt"
+  collect_path_status "RESEARCH_BRIEF.md" "$PROJECT_DIR/RESEARCH_BRIEF.md"
+  collect_path_status "AGENTS.md" "$PROJECT_DIR/AGENTS.md"
+  if [[ -d "$PROJECT_DIR/.claude" ]]; then
+    add_warning "发现旧 .claude/"
+  fi
+  if [[ -f "$PROJECT_DIR/.aris/installed-skills.txt" ]]; then
+    add_warning "发现旧 .aris/installed-skills.txt"
+  fi
+}
+
+array_json() {
+  local first=true item
+  printf '['
+  for item in "$@"; do
+    if $first; then
+      first=false
+    else
+      printf ','
+    fi
+    printf '"%s"' "$(json_escape "$item")"
+  done
+  printf ']'
+}
+
+if [[ $# -lt 1 ]]; then
+  usage 2
+fi
+
+SLUG="$1"
+shift
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON=true; shift ;;
+    --embed) EMBED=true; shift ;;
+    --with-pane) WITH_PANE=true; shift ;;
+    --pane-lines)
+      [[ $# -ge 2 ]] || usage 2
+      PANE_LINES="$2"
+      [[ "$PANE_LINES" =~ ^[0-9]+$ && "$PANE_LINES" -gt 0 ]] || { echo "[ERROR] --pane-lines 必须是正整数：$PANE_LINES" >&2; exit 2; }
+      shift 2
+      ;;
+    --help|-h) usage 0 ;;
+    *) echo "[ERROR] 未知参数：$1" >&2; usage 2 ;;
+  esac
+done
+
+if [[ "$SLUG" != "base" && ! "$SLUG" =~ $SLUG_RE ]]; then
+  echo "[ERROR] slug 必须是 kebab-case 或 base：$SLUG" >&2
+  exit 1
+fi
+
+IS_BASE=false
+if [[ "$SLUG" == "base" ]]; then
+  IS_BASE=true
+  PROJECT_DIR="$WORKSPACE_ROOT/projects"
+else
+  PROJECT_DIR="$WORKSPACE_ROOT/projects/$SLUG"
+fi
+SESSION="$TMUX_PREFIX-$SLUG"
+GENERATED_AT="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+
+EXISTS=false
+[[ -d "$PROJECT_DIR" ]] && EXISTS=true
+if ! $EXISTS; then
+  add_issue "项目目录不存在：$PROJECT_DIR"
+fi
+
+GOAL_FILE="$PROJECT_DIR/.codex/aris-goal.tsv"
+GOAL_HAS_RECORD=false
+GOAL_CREATED="-"
+GOAL_MODE="-"
+GOAL_PREVIEW="-"
+if [[ -f "$GOAL_FILE" ]]; then
+  GOAL_HAS_RECORD=true
+  GOAL_CREATED="$(read_state_field "$GOAL_FILE" created_at)"
+  GOAL_MODE="$(read_state_field "$GOAL_FILE" mode)"
+  GOAL_PREVIEW="$(read_state_field "$GOAL_FILE" goal_preview)"
+  [[ -n "$GOAL_CREATED" ]] || GOAL_CREATED="-"
+  [[ -n "$GOAL_MODE" ]] || GOAL_MODE="-"
+  [[ -n "$GOAL_PREVIEW" ]] || GOAL_PREVIEW="-"
+fi
+
+TMUX_STATE="stopped"
+PANE_STATUS="-"
+PANE_CWD="-"
+PANE_TAIL=""
+if command -v tmux >/dev/null && tmux has-session -t "=$SESSION" 2>/dev/null; then
+  PANE_CWD="$(tmux display-message -p -t "$(pane_target "$SESSION")" '#{pane_current_path}' 2>/dev/null || true)"
+  EXPECTED="$(canonical_dir "$PROJECT_DIR" 2>/dev/null || true)"
+  ACTUAL="$(canonical_dir "$PANE_CWD" 2>/dev/null || true)"
+  if [[ -n "$EXPECTED" && -n "$ACTUAL" && "$EXPECTED" == "$ACTUAL" ]]; then
+    TMUX_STATE="running"
+    PANE_TAIL="$(tmux capture-pane -t "$(pane_target "$SESSION")" -p -S -2000 2>/dev/null \
+      | awk 'NF { last = NR } { buf[NR] = $0 } END { for (i = 1; i <= last; i++) print buf[i] }' \
+      | tail -n "$PANE_LINES" || true)"
+    PANE_STATUS="$(classify_pane "$PANE_TAIL")"
+  else
+    TMUX_STATE="conflict"
+    add_issue "同名 tmux 会话不属于当前项目：$SESSION"
+  fi
+elif ! command -v tmux >/dev/null; then
+  TMUX_STATE="unavailable"
+  add_warning "tmux 不在 PATH 中"
+fi
+
+GIT_IS_REPO=false
+GIT_BRANCH="-"
+GIT_DIRTY="-"
+GIT_LAST="-"
+if $EXISTS && [[ -d "$PROJECT_DIR/.git" ]]; then
+  GIT_IS_REPO=true
+  if ! capture_git GIT_BRANCH "$PROJECT_DIR" branch --show-current; then
+    GIT_BRANCH=""
+  fi
+  [[ -n "$GIT_BRANCH" ]] || GIT_BRANCH="(detached)"
+  if capture_git GIT_STATUS "$PROJECT_DIR" status --porcelain --untracked-files=no; then
+    GIT_DIRTY="$(printf '%s\n' "$GIT_STATUS" | sed '/^$/d' | wc -l | tr -d ' ')"
+  else
+    GIT_DIRTY="?"
+  fi
+  if capture_git GIT_LAST "$PROJECT_DIR" log -1 --format='%cr | %s'; then
+    [[ -n "$GIT_LAST" ]] || GIT_LAST="无提交"
+  else
+    GIT_LAST="无提交或不可读"
+  fi
+elif $EXISTS && ! $IS_BASE; then
+  add_warning "不是 Git 项目：$PROJECT_DIR"
+fi
+
+collect_skeleton_status
+
+render_text() {
+  local heading="##"
+  if $EMBED; then
+    heading="###"
+  else
+    echo "# ARIS-Codex 项目诊断"
+    echo ""
+  fi
+  echo "- 生成时间：$GENERATED_AT"
+  echo "- 工作区：$WORKSPACE_ROOT"
+  echo "- 环境：$SLUG"
+  echo "- 路径：$PROJECT_DIR"
+  echo ""
+
+  echo "$heading 骨架"
+  if ! $EXISTS; then
+    echo "[ERROR] 项目目录不存在"
+  elif $IS_BASE; then
+    check_path "projects/.codex" "$PROJECT_DIR/.codex"
+    check_path "projects/.agents/skills" "$PROJECT_DIR/.agents/skills"
+    check_path "projects/AGENTS.md" "$PROJECT_DIR/AGENTS.md"
+  else
+    check_path ".env" "$PROJECT_DIR/.env"
+    check_path ".mcp.json" "$PROJECT_DIR/.mcp.json"
+    check_path ".venv/" "$PROJECT_DIR/.venv"
+    check_path ".codex/" "$PROJECT_DIR/.codex"
+    check_path ".agents/skills/" "$PROJECT_DIR/.agents/skills"
+    check_path ".aris/installed-skills-codex.txt" "$PROJECT_DIR/.aris/installed-skills-codex.txt"
+    check_path "RESEARCH_BRIEF.md" "$PROJECT_DIR/RESEARCH_BRIEF.md"
+    check_path "AGENTS.md" "$PROJECT_DIR/AGENTS.md"
+    if [[ -d "$PROJECT_DIR/.claude" ]]; then
+      echo "[WARN] 发现旧 .claude/"
+    fi
+    if [[ -f "$PROJECT_DIR/.aris/installed-skills.txt" ]]; then
+      echo "[WARN] 发现旧 .aris/installed-skills.txt"
+    fi
+  fi
+
+  echo ""
+  echo "$heading Goal"
+  if $IS_BASE; then
+    echo "[INFO] base 不接收项目 goal，使用 /aris-goal <slug> <goal...> 调度普通项目"
+  elif $GOAL_HAS_RECORD; then
+    echo "- 最近投递：$GOAL_CREATED"
+    echo "- 模式：$GOAL_MODE"
+    echo "- 摘要：$GOAL_PREVIEW"
+  elif [[ "$TMUX_STATE" == "running" ]]; then
+    echo "[INFO] 会话运行中，但没有 ARIS goal 记录；mode=external"
+  else
+    echo "[INFO] 没有 ARIS goal 记录"
+  fi
+
+  echo ""
+  echo "$heading tmux"
+  echo "- 会话：$SESSION"
+  echo "- 状态：$TMUX_STATE"
+  echo "- pane：$PANE_STATUS"
+  echo "- pane 目录：$PANE_CWD"
+
+  echo ""
+  echo "$heading Git"
+  if $GIT_IS_REPO; then
+    echo "- 分支：$GIT_BRANCH"
+    echo "- dirty：$GIT_DIRTY"
+    echo "- 最近提交：$GIT_LAST"
+  else
+    echo "[INFO] 非 Git 项目或目录不存在"
+  fi
+
+  if $WITH_PANE; then
+    echo ""
+    echo "$heading pane 摘要"
+    if [[ "$TMUX_STATE" == "running" && -n "$PANE_TAIL" ]]; then
+      printf '%s\n' "$PANE_TAIL" | sed 's/^/  /'
+    elif [[ "$TMUX_STATE" == "running" ]]; then
+      echo "  (pane 为空)"
+    else
+      echo "  (没有可读取的当前 workspace 运行中 pane)"
+    fi
+  fi
+
+  echo ""
+  echo "$heading 接管命令"
+  if $IS_BASE; then
+    echo "  arisc watch --once"
+    echo "  arisc report"
+    echo "  arisc audit"
+  else
+    echo "  arisc goal --peek $SLUG 40"
+    echo "  arisc send $SLUG --dry-run -- <message>"
+    echo "  arisc enter $SLUG"
+    echo "  arisc repair $SLUG"
+  fi
+
+  if [[ ${#ISSUES[@]} -gt 0 ]]; then
+    echo ""
+    echo "$heading 阻断问题"
+    local item
+    for item in "${ISSUES[@]}"; do
+      echo "- $item"
+    done
+  fi
+  if [[ ${#WARNINGS[@]} -gt 0 ]]; then
+    echo ""
+    echo "$heading 警告"
+    local item
+    for item in "${WARNINGS[@]}"; do
+      echo "- $item"
+    done
+  fi
+}
+
+render_json() {
+  local ok=true
+  [[ ${#ISSUES[@]} -eq 0 ]] || ok=false
+  printf '{"workspace_root":"%s","generated_at":"%s","slug":"%s","project_dir":"%s","exists":%s,"is_base":%s,' \
+    "$(json_escape "$WORKSPACE_ROOT")" \
+    "$(json_escape "$GENERATED_AT")" \
+    "$(json_escape "$SLUG")" \
+    "$(json_escape "$PROJECT_DIR")" \
+    "$EXISTS" \
+    "$IS_BASE"
+  printf '"ok":%s,' "$ok"
+  printf '"goal":{"has_goal_record":%s,"created_at":"%s","mode":"%s","goal_preview":"%s"},' \
+    "$GOAL_HAS_RECORD" \
+    "$(json_escape "$GOAL_CREATED")" \
+    "$(json_escape "$GOAL_MODE")" \
+    "$(json_escape "$GOAL_PREVIEW")"
+  printf '"tmux":{"session_name":"%s","state":"%s","pane_status":"%s","pane_current_path":"%s"},' \
+    "$(json_escape "$SESSION")" \
+    "$(json_escape "$TMUX_STATE")" \
+    "$(json_escape "$PANE_STATUS")" \
+    "$(json_escape "$PANE_CWD")"
+  printf '"git":{"is_repo":%s,"branch":"%s","dirty":"%s","last_commit":"%s"},' \
+    "$GIT_IS_REPO" \
+    "$(json_escape "$GIT_BRANCH")" \
+    "$(json_escape "$GIT_DIRTY")" \
+    "$(json_escape "$GIT_LAST")"
+  printf '"issues":'
+  array_json "${ISSUES[@]}"
+  printf ',"warnings":'
+  array_json "${WARNINGS[@]}"
+  if $WITH_PANE; then
+    printf ',"pane_tail":"%s"' "$(json_escape "$PANE_TAIL")"
+  fi
+  printf '}\n'
+}
+
+if $JSON; then
+  render_json
+else
+  render_text
+fi
+
+[[ ${#ISSUES[@]} -eq 0 ]]

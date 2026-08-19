@@ -1,0 +1,381 @@
+#!/usr/bin/env bash
+# aris-env：类 conda env 的环境管理入口。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+if [[ -z "${ARIS_REPO:-}" && -f "$WORKSPACE_ROOT/config" ]]; then
+  # shellcheck disable=SC1090
+  source "$WORKSPACE_ROOT/config"
+fi
+ARIS_REPO="${ARIS_REPO:-$HOME/work/aris-codex-skills}"
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SLUG_RE='^[a-z0-9]+(-[a-z0-9]+)*$'
+
+usage() {
+  local code="${1:-2}"
+  cat >&2 <<'EOF'
+用法：
+  arisc env
+  arisc env list [--json]
+  arisc env create <slug>
+  arisc env fork <project_name> [new_name]
+  arisc env info [--json] [slug|base]
+  arisc env export [--json] [--save] [--out FILE] <slug|base>
+  arisc env export --all [--json] [--save] [--out FILE]
+  arisc env activate [--no-env] [--no-venv] [--no-cd] <slug>
+  arisc env run [--no-env] [--no-venv] [--dry-run] <slug> -- <command...>
+  arisc env repair <slug...>|--all
+  arisc env remove <slug> [--force]
+  arisc env rename <old> <new>
+  arisc env restore <slug> [--ts YYYYMMDD-HHMMSS]
+  arisc env path <slug>
+
+作用：
+  类 conda env 的环境管理入口，统一封装环境创建、迁移、列表、
+  信息、导出、激活、运行、修复、删除和恢复命令。
+
+说明：
+  - arisc env 等价于 arisc env list。
+  - arisc env create 等价于 arisc new。
+  - arisc env fork 等价于 arisc fork。
+  - arisc env export 只读导出环境清单，不输出 .env 内容。
+  - arisc env export --all 会导出 base 和所有项目的环境清单。
+  - arisc env activate 只输出可 eval 的 shell 片段，真正激活当前 shell 需要：
+    eval "$(arisc env activate <slug>)"
+  - arisc env run 不启动 Codex、不 attach tmux，只在项目环境中执行普通命令。
+EOF
+  exit "$code"
+}
+
+json_escape() {
+  local s="${1:-}"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\b'/\\b}
+  s=${s//$'\f'/\\f}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+read_project_name() {
+  local pyproject="$1"
+  [[ -f "$pyproject" ]] || return 0
+  awk -F'"' '/^[[:space:]]*name[[:space:]]*=/{print $2; exit}' "$pyproject"
+}
+
+skill_names_json() {
+  local manifest="$1"
+  if [[ ! -f "$manifest" ]]; then
+    printf '[]\n'
+    return 0
+  fi
+  awk -F'\t' '$1 == "skill" { print $2 }' "$manifest" | jq -R . | jq -s .
+}
+
+env_export() {
+  local json=false target="" project_dir is_base=false inspect_json manifest skill_count skills_json
+  local pyproject_name python_path python_version agent_count generated_at
+  local save_export=false out_file=""
+  local all_envs=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) json=true; shift ;;
+      --all) all_envs=true; shift ;;
+      --save) save_export=true; shift ;;
+      --out)
+        [[ $# -ge 2 ]] || { echo "[ERROR] --out 缺少文件路径" >&2; exit 2; }
+        out_file="$2"
+        save_export=true
+        shift 2
+        ;;
+      --help|-h)
+        cat >&2 <<'EOF'
+用法：
+  arisc env export [--json] [--save] [--out FILE] <slug|base>
+  arisc env export --all [--json] [--save] [--out FILE]
+
+只读导出 ARIS-Codex 环境清单。不会输出项目 .env 内容，不启动 Codex，不发送消息。
+EOF
+        exit 0
+        ;;
+      --*) echo "[ERROR] 未知 export 参数：$1" >&2; exit 2 ;;
+      *)
+        if [[ -n "$target" ]]; then
+          echo "[ERROR] export 只能接收一个环境名" >&2
+          exit 2
+        fi
+        target="$1"
+        shift
+        ;;
+    esac
+  done
+
+  if $all_envs && [[ -n "$target" ]]; then
+    echo "[ERROR] --all 不能和显式环境名同时使用" >&2
+    exit 2
+  fi
+  if ! $all_envs && [[ -z "$target" ]]; then
+    echo "[ERROR] 缺少环境名：arisc env export <slug|base>，或使用 --all" >&2
+    exit 2
+  fi
+
+  render_all_exports() {
+    local names generated_all
+    generated_all="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    mapfile -t names < <("$SCRIPT_DIR/aris-ls" --json | jq -r '.items[].name')
+    if $json; then
+      {
+        printf '{"workspace_root":"%s","aris_repo":"%s","generated_at":"%s","items":[' \
+          "$(json_escape "$WORKSPACE_ROOT")" \
+          "$(json_escape "$ARIS_REPO")" \
+          "$(json_escape "$generated_all")"
+        local first=true name item_json
+        for name in "${names[@]}"; do
+          [[ -n "$name" ]] || continue
+          item_json="$("$SCRIPT_DIR/aris-env" export --json "$name")"
+          if $first; then
+            first=false
+          else
+            printf ','
+          fi
+          printf '%s' "$item_json"
+        done
+        printf ']}\n'
+      }
+    else
+      echo "# ARIS-Codex 全环境导出"
+      echo ""
+      echo "- 生成时间：$generated_all"
+      echo "- 工作区：$WORKSPACE_ROOT"
+      echo "- 环境数量：${#names[@]}"
+      echo "- 说明：本导出不会包含任何 .env 内容。"
+      local name
+      for name in "${names[@]}"; do
+        [[ -n "$name" ]] || continue
+        echo ""
+        echo "---"
+        echo ""
+        "$SCRIPT_DIR/aris-env" export "$name"
+      done
+    fi
+  }
+
+  if $all_envs; then
+    if $save_export; then
+      if [[ -z "$out_file" ]]; then
+        if $json; then
+          out_file="$WORKSPACE_ROOT/reports/aris-env-export-all-$(date +%Y%m%d-%H%M%S).json"
+        else
+          out_file="$WORKSPACE_ROOT/reports/aris-env-export-all-$(date +%Y%m%d-%H%M%S).md"
+        fi
+      fi
+      mkdir -p "$(dirname "$out_file")"
+      render_all_exports | tee "$out_file"
+      echo "[OK] 环境导出已保存：$out_file" >&2
+    else
+      render_all_exports
+    fi
+    return 0
+  fi
+
+  if [[ "$target" != "base" && ! "$target" =~ $SLUG_RE ]]; then
+    echo "[ERROR] slug 必须是 kebab-case 或 base：$target" >&2
+    exit 1
+  fi
+
+  command -v jq >/dev/null || { echo "[ERROR] jq 不在 PATH 中" >&2; exit 1; }
+
+  if [[ "$target" == "base" ]]; then
+    is_base=true
+    project_dir="$WORKSPACE_ROOT/projects"
+  else
+    project_dir="$WORKSPACE_ROOT/projects/$target"
+  fi
+  [[ -d "$project_dir" ]] || { echo "[ERROR] 环境不存在：$project_dir" >&2; exit 1; }
+
+  inspect_json="$("$SCRIPT_DIR/aris-inspect" "$target" --json)"
+  generated_at="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  manifest="$project_dir/.aris/installed-skills-codex.txt"
+  if [[ -f "$manifest" ]]; then
+    skill_count="$(awk -F'\t' '$1 == "skill" { count++ } END { print count + 0 }' "$manifest")"
+  else
+    skill_count="0"
+  fi
+  skills_json="$(skill_names_json "$manifest")"
+  agent_count="0"
+  if [[ -d "$project_dir/.agents/skills" ]]; then
+    agent_count=0
+    shopt -s nullglob
+    for skill_entry in "$project_dir/.agents/skills"/*; do
+      [[ -d "$skill_entry" || -L "$skill_entry" ]] && ((agent_count += 1))
+    done
+    shopt -u nullglob
+  fi
+  pyproject_name="$(read_project_name "$project_dir/pyproject.toml")"
+  python_path="$project_dir/.venv/bin/python"
+  python_version="-"
+  if [[ -x "$python_path" ]]; then
+    python_version="$("$python_path" -V 2>&1 || true)"
+    [[ -n "$python_version" ]] || python_version="-"
+  else
+    python_path="-"
+  fi
+
+  render_export_json() {
+    jq -n \
+      --arg workspace_root "$WORKSPACE_ROOT" \
+      --arg aris_repo "$ARIS_REPO" \
+      --arg generated_at "$generated_at" \
+      --arg slug "$target" \
+      --arg project_dir "$project_dir" \
+      --arg pyproject_name "$pyproject_name" \
+      --arg python_path "$python_path" \
+      --arg python_version "$python_version" \
+      --arg manifest "$manifest" \
+      --argjson is_base "$is_base" \
+      --argjson inspect "$inspect_json" \
+      --argjson skill_count "$skill_count" \
+      --argjson agent_skill_count "$agent_count" \
+      --argjson skills "$skills_json" \
+      '{
+        workspace_root: $workspace_root,
+        aris_repo: $aris_repo,
+        generated_at: $generated_at,
+        slug: $slug,
+        project_dir: $project_dir,
+        is_base: $is_base,
+        pyproject_name: $pyproject_name,
+        python: {path: $python_path, version: $python_version},
+        codex: {
+          metadata_dir: ($project_dir + "/.codex"),
+          agents_skills_dir: ($project_dir + "/.agents/skills"),
+          agent_skill_count: $agent_skill_count,
+          installed_skills_manifest: $manifest,
+          installed_skill_count: $skill_count,
+          installed_skills: $skills
+        },
+        inspect: $inspect
+      }'
+  }
+
+  render_export_text() {
+    echo "# ARIS-Codex 环境导出"
+    echo ""
+    echo "- 生成时间：$generated_at"
+    echo "- 环境：$target"
+    echo "- 类型：$([[ "$is_base" == "true" ]] && echo base || echo project)"
+    echo "- 工作区：$WORKSPACE_ROOT"
+    echo "- 路径：$project_dir"
+    echo "- ARIS_REPO：$ARIS_REPO"
+    if [[ -n "$pyproject_name" ]]; then
+      echo "- pyproject.name：$pyproject_name"
+    fi
+    echo ""
+    echo "## Python"
+    echo "- python：$python_path"
+    echo "- version：$python_version"
+    echo ""
+    echo "## Codex"
+    echo "- 元数据：$project_dir/.codex"
+    echo "- 技能入口：$project_dir/.agents/skills"
+    echo "- 技能入口数量：$agent_count"
+    echo "- manifest：$manifest"
+    echo "- installed skill 数量：$skill_count"
+    echo ""
+    echo "## 状态"
+    printf '%s\n' "$inspect_json" | jq -r '
+      "- 健康：" + (if .ok then "OK" else "WARN" end),
+      "- tmux：" + .tmux.state + "；pane=" + .tmux.pane_status,
+      "- goal 记录：" + (.goal.has_goal_record | tostring) + "；摘要=" + .goal.goal_preview,
+      "- Git：branch=" + .git.branch + "；dirty=" + .git.dirty + "；last=" + .git.last_commit
+    '
+    echo ""
+    echo "## 说明"
+    echo "- 本导出不会包含 .env 内容；API key 等本机秘密仍由 shared/env 管理。"
+    echo "- 需要导入已有研究项目时使用：arisc fork <project_name> [new_name]"
+    if [[ "$is_base" == "true" ]]; then
+      echo "- 需要修复 base 骨架时使用：arisc base init --force-templates"
+    else
+      echo "- 需要修复当前环境骨架时使用：arisc env repair $target"
+    fi
+  }
+
+  render_export() {
+    if $json; then
+      render_export_json
+    else
+      render_export_text
+    fi
+  }
+
+  if $save_export; then
+    if [[ -z "$out_file" ]]; then
+      if $json; then
+        out_file="$WORKSPACE_ROOT/reports/aris-env-export-$target-$(date +%Y%m%d-%H%M%S).json"
+      else
+        out_file="$WORKSPACE_ROOT/reports/aris-env-export-$target-$(date +%Y%m%d-%H%M%S).md"
+      fi
+    fi
+    mkdir -p "$(dirname "$out_file")"
+    render_export | tee "$out_file"
+    echo "[OK] 环境导出已保存：$out_file" >&2
+  else
+    render_export
+  fi
+}
+
+if [[ $# -eq 0 ]]; then
+  exec "$SCRIPT_DIR/aris-ls"
+fi
+
+sub="$1"
+shift
+
+case "$sub" in
+  list|ls)
+    exec "$SCRIPT_DIR/aris-ls" "$@"
+    ;;
+  create|new)
+    exec "$SCRIPT_DIR/aris-new" "$@"
+    ;;
+  fork)
+    exec "$SCRIPT_DIR/aris-fork" "$@"
+    ;;
+  info)
+    exec "$SCRIPT_DIR/aris-info" "$@"
+    ;;
+  export)
+    env_export "$@"
+    ;;
+  activate)
+    exec "$SCRIPT_DIR/aris-activate" "$@"
+    ;;
+  run)
+    exec "$SCRIPT_DIR/aris-run" "$@"
+    ;;
+  repair)
+    exec "$SCRIPT_DIR/aris-repair" "$@"
+    ;;
+  remove|rm|delete|del)
+    exec "$SCRIPT_DIR/aris-del" "$@"
+    ;;
+  rename)
+    exec "$SCRIPT_DIR/aris-rename" "$@"
+    ;;
+  restore)
+    exec "$SCRIPT_DIR/aris-restore" "$@"
+    ;;
+  path)
+    exec "$SCRIPT_DIR/aris-path" "$@"
+    ;;
+  help|--help|-h)
+    usage 0
+    ;;
+  *)
+    echo "[ERROR] 未知 env 子命令：$sub" >&2
+    usage 2
+    ;;
+esac

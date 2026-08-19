@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# aris-del：软删除 ARIS-Codex 项目，并结束对应 tmux 会话。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+TMUX_PREFIX="aris-codex"
+
+usage() {
+  cat >&2 <<'EOF'
+用法：arisc del <slug> [--force] [--with-history]
+
+行为：
+  1. 如果 tmux 会话 aris-codex-<slug> 正在运行，则结束它。
+  2. 将 projects/<slug>/ 移动到 .trash/<slug>-<YYYYMMDD-HHMMSS>/。
+  3. Codex 全局会话历史保留在 ~/.codex/sessions，由 Codex CLI 自己管理。
+
+参数：
+  --force          跳过确认
+  --with-history   保留选项；ARISC 不会移动 Codex 全局会话历史
+
+恢复：
+  arisc restore <slug>
+EOF
+  exit 2
+}
+
+[[ $# -ge 1 ]] || usage
+
+SLUG=""
+FORCE=false
+WITH_HISTORY=false
+for arg in "$@"; do
+  case "$arg" in
+    --force) FORCE=true ;;
+    --with-history) WITH_HISTORY=true ;;
+    --help|-h) usage ;;
+    -*) echo "[ERROR] 未知参数：$arg" >&2; usage ;;
+    *)
+      [[ -z "$SLUG" ]] || { echo "[ERROR] 只能传入一个 slug" >&2; usage; }
+      SLUG="$arg"
+      ;;
+  esac
+done
+[[ -n "$SLUG" ]] || usage
+
+PROJ="$WORKSPACE_ROOT/projects/$SLUG"
+[[ -d "$PROJ" ]] || { echo "[ERROR] 项目不存在：$PROJ" >&2; exit 1; }
+
+TRASH_ROOT="$WORKSPACE_ROOT/.trash"
+TS=$(date +%Y%m%d-%H%M%S)
+TRASH_DIR="$TRASH_ROOT/$SLUG-$TS"
+TMUX_SESSION="$TMUX_PREFIX-$SLUG"
+
+canonical_dir() {
+  (cd "$1" 2>/dev/null && pwd -P) || return 1
+}
+
+session_matches_project() {
+  local session="$1" project_dir="$2" session_cwd expected actual
+  command -v tmux >/dev/null || return 1
+  tmux has-session -t "=$session" 2>/dev/null || return 1
+  session_cwd="$(tmux display-message -p -t "=$session:0.0" '#{pane_current_path}' 2>/dev/null || true)"
+  [[ -n "$session_cwd" ]] || return 1
+  expected="$(canonical_dir "$project_dir")" || return 1
+  actual="$(canonical_dir "$session_cwd")" || return 1
+  [[ "$actual" == "$expected" ]]
+}
+
+echo "[INFO] 将删除环境：$SLUG"
+echo "  project : $PROJ"
+echo "  trash   : $TRASH_DIR"
+TMUX_RUNNING=false
+if command -v tmux >/dev/null && tmux has-session -t "=$TMUX_SESSION" 2>/dev/null; then
+  if session_matches_project "$TMUX_SESSION" "$PROJ"; then
+    TMUX_RUNNING=true
+    echo "  tmux    : 结束 $TMUX_SESSION"
+  else
+    echo "  tmux    : 同名会话不属于当前项目，跳过结束 $TMUX_SESSION"
+  fi
+else
+  echo "  tmux    : 未运行"
+fi
+if $WITH_HISTORY; then
+  echo "  history : Codex 全局历史不会移动；如需清理请自行管理 ~/.codex/sessions"
+fi
+
+if ! $FORCE; then
+  printf "继续？[y/N] "
+  read -r REPLY
+  [[ "$REPLY" =~ ^[Yy]$ ]] || { echo "[INFO] 已取消"; exit 0; }
+fi
+
+if $TMUX_RUNNING; then
+  tmux kill-session -t "=$TMUX_SESSION"
+  echo "[OK] 已结束 tmux：$TMUX_SESSION"
+fi
+
+mkdir -p "$TRASH_ROOT"
+if [[ ! -f "$TRASH_ROOT/.gitignore" ]]; then
+  printf '*\n!.gitignore\n' > "$TRASH_ROOT/.gitignore"
+fi
+
+mv "$PROJ" "$TRASH_DIR"
+echo "[OK] 已移动项目到：$TRASH_DIR"
+echo ""
+echo "恢复命令："
+echo "  arisc restore $SLUG --ts $TS"

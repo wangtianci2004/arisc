@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+# aris-auto：投递 goal 后立即输出 base 监控摘要。
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+MONITOR=true
+WITH_PANE=false
+WITH_AGENDA=true
+SNAPSHOT=false
+SUMMARY=false
+SUMMARY_JSON=false
+SUMMARY_JSON_ONLY=false
+PANE_LINES=3
+
+usage() {
+  local code="${1:-2}"
+  cat >&2 <<'EOF'
+用法：
+  arisc auto [监控选项] <slug> [goal 选项] -- <目标文本...>
+  arisc auto [监控选项] --batch FILE|- [goal batch 选项]
+
+监控选项必须放在 goal 参数前：
+  --no-monitor   投递完成后不输出 base 监控摘要
+  --with-pane    监控摘要附加运行中 pane 末尾
+  --pane-lines N pane 摘要行数，默认 3；仅在 --with-pane 时生效
+  --no-agenda    投递完成后不输出接管议程
+  --snapshot     投递完成后保存一份 base 接管快照到 reports/
+  --summary      投递完成后额外输出一页 base 接管摘要
+  --summary-json 投递完成后额外输出 base 接管摘要 JSON
+  --summary-json-only
+                投递完成后 stdout 只输出 base 接管摘要 JSON；其他日志写 stderr
+
+goal 选项原样转发给 arisc goal，例如：
+  --create
+  --resume
+  --dry-run
+  --continue-on-error
+
+作用：
+  一条命令把目标投递给项目 Codex /goal，随后用 base 视角输出
+  status、alerts 和 agenda，方便继续监控或人工接管。
+
+说明：
+  - 本命令不实现新的会话逻辑；投递完全复用 arisc goal。
+  - --dry-run 时只预览 goal 动作，不输出监控摘要、摘要 JSON，也不保存快照。
+  - 批量文件格式沿用 arisc goal --batch：slug<TAB>目标文本。
+EOF
+  exit "$code"
+}
+
+goal_is_dry_run() {
+  local seen_batch=false seen_separator=false
+  if [[ "${1:-}" == "--batch" ]]; then
+    seen_batch=true
+  fi
+
+  while [[ $# -gt 0 ]]; do
+    if ! $seen_batch && [[ "$seen_separator" == "true" ]]; then
+      return 1
+    fi
+    case "$1" in
+      --)
+        seen_separator=true
+        shift
+        ;;
+      --dry-run)
+        return 0
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+  return 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-monitor)
+      MONITOR=false
+      shift
+      ;;
+    --with-pane)
+      WITH_PANE=true
+      shift
+      ;;
+    --pane-lines)
+      [[ $# -ge 2 ]] || usage 2
+      PANE_LINES="$2"
+      [[ "$PANE_LINES" =~ ^[0-9]+$ && "$PANE_LINES" -gt 0 ]] || { echo "[ERROR] --pane-lines 必须是正整数：$PANE_LINES" >&2; exit 2; }
+      shift 2
+      ;;
+    --no-agenda)
+      WITH_AGENDA=false
+      shift
+      ;;
+    --snapshot)
+      SNAPSHOT=true
+      shift
+      ;;
+    --summary)
+      SUMMARY=true
+      shift
+      ;;
+    --summary-json)
+      SUMMARY_JSON=true
+      shift
+      ;;
+    --summary-json-only)
+      SUMMARY_JSON=true
+      SUMMARY_JSON_ONLY=true
+      MONITOR=false
+      shift
+      ;;
+    --help|-h)
+      usage 0
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if $SUMMARY_JSON_ONLY; then
+  SUMMARY=false
+  MONITOR=false
+fi
+
+[[ $# -gt 0 ]] || usage 2
+
+if $SUMMARY_JSON_ONLY; then
+  echo "[INFO] 投递目标：arisc goal $*" >&2
+  "$SCRIPT_DIR/aris-goal" "$@" >&2
+else
+  echo "[INFO] 投递目标：arisc goal $*"
+  "$SCRIPT_DIR/aris-goal" "$@"
+fi
+
+if goal_is_dry_run "$@"; then
+  if $SUMMARY_JSON_ONLY; then
+    echo "[INFO] dry-run 模式未改变会话，跳过 base 监控摘要" >&2
+  else
+    echo "[INFO] dry-run 模式未改变会话，跳过 base 监控摘要"
+  fi
+  exit 0
+fi
+
+if ! $MONITOR && ! $SNAPSHOT && ! $SUMMARY && ! $SUMMARY_JSON; then
+  if $SUMMARY_JSON_ONLY; then
+    echo "[INFO] 已按 --no-monitor 跳过 base 监控摘要" >&2
+  else
+    echo "[INFO] 已按 --no-monitor 跳过 base 监控摘要"
+  fi
+  exit 0
+fi
+
+status_args=(status)
+if $WITH_PANE; then
+  status_args+=(--with-pane --pane-lines "$PANE_LINES")
+fi
+
+if $MONITOR; then
+  echo ""
+  echo "## Base 状态"
+  "$SCRIPT_DIR/aris-base" "${status_args[@]}"
+
+  echo ""
+  echo "## Base 告警摘要"
+  "$SCRIPT_DIR/aris-base" alerts --summary
+
+  if $WITH_AGENDA; then
+    echo ""
+    echo "## Base 接管议程"
+    "$SCRIPT_DIR/aris-base" agenda
+  fi
+else
+  if $SUMMARY_JSON_ONLY; then
+    echo "[INFO] 已按 --no-monitor 跳过 base 监控摘要" >&2
+  else
+    echo "[INFO] 已按 --no-monitor 跳过 base 监控摘要"
+  fi
+fi
+
+if $SNAPSHOT; then
+  snapshot_args=(snapshot)
+  if $WITH_PANE; then
+    snapshot_args+=(--with-pane --pane-lines "$PANE_LINES")
+  fi
+  if $SUMMARY_JSON_ONLY; then
+    echo "[INFO] 保存 base 接管快照" >&2
+    "$SCRIPT_DIR/aris-base" "${snapshot_args[@]}" >&2
+  else
+    echo ""
+    echo "## Base 接管快照"
+    "$SCRIPT_DIR/aris-base" "${snapshot_args[@]}"
+  fi
+fi
+
+if $SUMMARY; then
+  echo ""
+  echo "## Base 接管摘要"
+  "$SCRIPT_DIR/aris-base" summary
+fi
+
+if $SUMMARY_JSON; then
+  if ! $SUMMARY_JSON_ONLY; then
+    echo ""
+    echo "## Base 接管摘要 JSON"
+  fi
+  "$SCRIPT_DIR/aris-base" summary --json
+fi
+
+if $SUMMARY_JSON_ONLY; then
+  {
+    echo ""
+    echo "后续监控："
+    echo "  arisc base watch"
+    echo "  arisc base agenda"
+    echo "  arisc base summary"
+    echo "  arisc base summary --json"
+    echo "  arisc base report --with-agenda"
+    echo "  arisc reports --type snapshot --show latest"
+  } >&2
+else
+  echo ""
+  echo "后续监控："
+  echo "  arisc base watch"
+  echo "  arisc base agenda"
+  echo "  arisc base summary"
+  echo "  arisc base summary --json"
+  echo "  arisc base report --with-agenda"
+  echo "  arisc reports --type snapshot --show latest"
+fi

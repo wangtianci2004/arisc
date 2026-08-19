@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+# aris-repo：设置、克隆或更新 ARIS Codex 技能上游仓库。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+CONFIG_FILE="$WORKSPACE_ROOT/config"
+UPSTREAM_URL="${ARIS_REPO_URL:-https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep.git}"
+
+SOURCE="默认值"
+if [[ -n "${ARIS_REPO:-}" ]]; then
+  SOURCE="环境变量（已导出 \$ARIS_REPO）"
+elif [[ -f "$CONFIG_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+  [[ -n "${ARIS_REPO:-}" ]] && SOURCE="配置文件（${CONFIG_FILE}）"
+fi
+ARIS_REPO="${ARIS_REPO:-$HOME/work/aris-codex-skills}"
+
+looks_like_codex_repo() {
+  [[ -x "$1/tools/install_aris_codex.sh" && -d "$1/skills/skills-codex" ]]
+}
+
+print_status() {
+  echo "当前 ARIS_REPO    : $ARIS_REPO"
+  echo "来源              : $SOURCE"
+  if [[ ! -d "$ARIS_REPO" ]]; then
+    echo "状态              : 缺失（路径不存在）"
+    return
+  fi
+  if [[ ! -d "$ARIS_REPO/.git" ]]; then
+    echo "状态              : 路径存在但不是 Git 仓库"
+    return
+  fi
+
+  local branch commit remote
+  branch=$(git -C "$ARIS_REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
+  commit=$(git -C "$ARIS_REPO" rev-parse --short HEAD 2>/dev/null || echo "?")
+  remote=$(git -C "$ARIS_REPO" remote get-url origin 2>/dev/null || echo "(no origin)")
+  echo "状态              : Git 仓库"
+  echo "分支              : $branch @ $commit"
+  echo "远端 origin       : $remote"
+
+  if git -C "$ARIS_REPO" rev-parse --verify -q "@{u}" >/dev/null 2>&1; then
+    git -C "$ARIS_REPO" fetch --quiet 2>/dev/null || true
+    local behind ahead
+    behind=$(git -C "$ARIS_REPO" rev-list --count "HEAD..@{u}" 2>/dev/null || echo 0)
+    ahead=$(git -C "$ARIS_REPO" rev-list --count "@{u}..HEAD" 2>/dev/null || echo 0)
+    echo "相对上游          : 落后 $behind 个提交，领先 $ahead 个提交"
+  else
+    echo "相对上游          : 未设置上游跟踪分支"
+  fi
+
+  if looks_like_codex_repo "$ARIS_REPO"; then
+    echo "ARIS Codex 链路   : 是（存在 install_aris_codex.sh 和 skills/skills-codex）"
+  else
+    echo "ARIS Codex 链路   : 否（缺少 tools/install_aris_codex.sh 或 skills/skills-codex）"
+  fi
+}
+
+write_config() {
+  local path="$1"
+  mkdir -p "$WORKSPACE_ROOT"
+  cat > "$CONFIG_FILE" <<EOF
+# 由 \`arisc repo\` 管理，也可以手动编辑。
+# 当 ARIS_REPO 未导出时，aris-* 脚本会读取此文件。
+ARIS_REPO="$path"
+EOF
+  echo "  ✓ 已写入 ARIS_REPO=$path -> $CONFIG_FILE"
+}
+
+clone_or_pull() {
+  local path="$1"
+  if [[ ! -d "$path" ]]; then
+    echo "  -> 克隆 $UPSTREAM_URL -> $path"
+    git clone "$UPSTREAM_URL" "$path"
+    return
+  fi
+  if [[ ! -d "$path/.git" ]]; then
+    echo "[ERROR] $path 已存在但不是 Git 仓库，拒绝覆盖" >&2
+    return 1
+  fi
+  local remote
+  remote=$(git -C "$path" remote get-url origin 2>/dev/null || echo "")
+  if [[ "$remote" != *"Auto-claude-code-research-in-sleep"* ]]; then
+    echo "[WARN] $path/.git origin 是 '$remote'"
+    echo "       期望它指向 ARIS 技能上游或你的 fork"
+    printf "仍然使用？[y/N] "
+    read -r reply
+    [[ "$reply" =~ ^[Yy]$ ]] || return 1
+  fi
+  echo "  -> 在 $path 中执行 git pull"
+  git -C "$path" pull --ff-only
+}
+
+setup_non_interactive() {
+  local path="${1:-$ARIS_REPO}"
+  path="${path/#\~/$HOME}"
+  case "$path" in
+    /*) ;;
+    *) path="$(pwd)/$path" ;;
+  esac
+
+  if [[ ! -e "$path" ]]; then
+    command -v git >/dev/null 2>&1 || {
+      echo "[ERROR] 自动配置 ARIS_REPO 需要 git" >&2
+      return 1
+    }
+    mkdir -p "$(dirname "$path")"
+    echo "  -> 克隆 $UPSTREAM_URL -> $path"
+    git clone "$UPSTREAM_URL" "$path"
+  elif [[ ! -d "$path/.git" ]]; then
+    echo "[ERROR] $path 已存在但不是 Git 仓库，拒绝覆盖" >&2
+    return 1
+  else
+    echo "  -> 使用现有 ARIS 技能仓库：$path"
+  fi
+
+  if ! looks_like_codex_repo "$path"; then
+    echo "[ERROR] 目标仓库缺少 Codex 技能链：tools/install_aris_codex.sh 或 skills/skills-codex" >&2
+    return 1
+  fi
+  write_config "$path"
+  echo "[OK] ARIS 技能仓库已配置"
+}
+
+interactive() {
+  echo "── 当前状态 ──"
+  print_status
+  echo ""
+  printf "新的 ARIS_REPO 路径 [回车沿用当前值]: "
+  read -r new_path
+  if [[ -z "$new_path" ]]; then
+    new_path="$ARIS_REPO"
+  fi
+  new_path="${new_path/#~/$HOME}"
+  case "$new_path" in
+    /*) ;;
+    *) new_path="$(pwd)/$new_path" ;;
+  esac
+
+  echo ""
+  echo "── 计划 ──"
+  echo "  目标    : $new_path"
+  if [[ -d "$new_path/.git" ]]; then
+    echo "  动作    : git pull"
+  elif [[ -d "$new_path" ]]; then
+    echo "  动作    : 中止（路径存在但不是 Git 仓库）"
+  else
+    echo "  动作    : git clone $UPSTREAM_URL"
+  fi
+  echo ""
+  printf "继续？[Y/n] "
+  read -r reply
+  [[ "$reply" =~ ^[Nn]$ ]] && { echo "[INFO] 已取消"; exit 0; }
+
+  echo ""
+  echo "── 执行 ──"
+  clone_or_pull "$new_path"
+  if ! looks_like_codex_repo "$new_path"; then
+    echo "[ERROR] 目标仓库缺少 Codex 技能链：tools/install_aris_codex.sh 或 skills/skills-codex" >&2
+    exit 1
+  fi
+  write_config "$new_path"
+
+  echo ""
+  echo "[OK] repo 已配置"
+  has_projects=false
+  if [[ -d "$WORKSPACE_ROOT/projects" ]]; then
+    for project_dir in "$WORKSPACE_ROOT/projects"/*/; do
+      [[ -d "$project_dir" ]] || continue
+      has_projects=true
+      break
+    done
+  fi
+  if $has_projects; then
+    echo ""
+    echo "下一步：运行 arisc update，把所有项目收敛到 .agents/skills。"
+  fi
+}
+
+sub="${1:-}"
+case "$sub" in
+  ""|interactive) interactive ;;
+  status) print_status ;;
+  setup|init)
+    shift
+    [[ $# -le 1 ]] || { echo "[ERROR] 用法：arisc repo setup [path]" >&2; exit 2; }
+    setup_non_interactive "${1:-$ARIS_REPO}"
+    ;;
+  --help|-h|help)
+    cat <<'EOF'
+用法：
+  arisc repo
+  arisc repo status
+  arisc repo setup [path]
+
+交互流程：
+  1. 显示当前 ARIS_REPO 和 Git 状态。
+  2. 输入新的上游路径，回车表示沿用当前路径。
+  3. 如果路径不存在则克隆上游；如果已是 Git 仓库则 git pull。
+  4. 验证 tools/install_aris_codex.sh 和 skills/skills-codex。
+  5. 写入 $WORKSPACE_ROOT/config。
+
+上游：
+  https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep
+
+非交互配置：
+  `setup` 会在目标不存在时克隆上游，验证 Codex 技能链并写入 config；
+  已存在的仓库不会被自动更新。可用 ARIS_REPO_URL 覆盖克隆地址。
+EOF
+    ;;
+  *) echo "[ERROR] 未知子命令：${sub}，可尝试：arisc repo --help" >&2; exit 2 ;;
+esac

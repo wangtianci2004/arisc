@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# arisc：ARIS-Codex 工作区子命令分发器。
+
+if (( BASH_VERSINFO[0] < 4 )); then
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    for modern_bash in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+      if [[ -x "$modern_bash" ]]; then
+        exec "$modern_bash" "$0" "$@"
+      fi
+    done
+    echo "[ERROR] ARISC 需要 Bash 4.4+；请先运行：brew install bash" >&2
+  else
+    echo "[ERROR] ARISC 需要 Bash 4.4+，当前版本：$BASH_VERSION" >&2
+  fi
+  exit 1
+fi
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  TARGET="$(readlink "$SOURCE")"
+  if [[ "$TARGET" == /* ]]; then
+    SOURCE="$TARGET"
+  else
+    SOURCE="$DIR/$TARGET"
+  fi
+done
+DISPATCH_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+print_help() {
+  cat <<'EOF'
+arisc：多项目 ARIS-Codex 工作区管理器
+
+用法
+  arisc <subcommand> [args...]
+  arisc help
+  arisc --version
+
+  生命周期
+  new <slug>          创建新项目：Codex skills、.env 链接、uv venv、Git
+  fork <project> [new] 从已有研究工作区复制项目并补齐 Codex 骨架
+  goal <slug> <text>  向项目 Codex 会话投递 /goal，在 tmux 后台持续执行；status 支持 --json
+  auto <slug> <text>  投递 /goal 后立即输出 base 监控摘要；支持 --batch 和 --snapshot
+  base                base 工作区统一监控和接管入口：status/watch/alerts/agenda/summary/report/snapshot/enter
+  status              只读输出一屏工作区总览，等价于 watch --once；支持 --json
+  alerts              只读显示 blocked、attention、waiting 或 stopped 项目；支持 --summary、--sort、--only 和 --pane-lines
+  agenda              只读生成 blocked、waiting、attention、stopped 项目的接管议程
+  triage              只读汇总需要人工关注项目，并逐个生成 inspect 接管诊断；支持 --sort 和 --save
+  report              生成只读交接报告，便于 base 总览和人工接管；--save 会更新 reports/latest.md
+  reports             只读列出或查看 report/triage/env/snapshot/status/doctor/audit 保存结果；支持 --type 和 --json
+  watch               只读刷新环境、goal 和 tmux 状态
+  info [slug]         只读输出工作区或单项目信息，类似 conda info
+  inspect <slug>      只读诊断单个项目的骨架、goal、tmux、Git 和可选 pane
+  env                 类 conda env 的环境管理入口：create/fork/list/info/export/activate/run/repair/remove
+  repair <slug...>    给已有项目补齐 Codex 运行骨架和 skill 链接
+  activate <slug>     输出可 eval 的项目环境激活脚本，类似 conda activate
+  run <slug> -- <cmd> 在指定项目目录和 .venv 环境中执行命令
+  send <slug> <msg>   向正在运行的项目 Codex 会话发送单行指令
+  tail <slug> [N]     当前阶段明确报错；不解析 Codex 全局会话历史
+  enter <slug>        连接或创建 tmux 托管的 Codex 会话
+  enter base          进入工作区级 Codex base 环境，工作目录为 projects/
+  happy <slug>        ARIS-Codex 暂不支持；保留命令并明确报错
+  ls                  列出所有项目的阶段和 tmux 状态；支持 --json
+  path <slug>         输出项目绝对路径，便于 cd $(arisc path foo)
+  del <slug>          软删除项目到 .trash/，并结束对应 tmux 会话
+  restore <slug>      从 .trash/ 恢复项目
+  rename <old> <new>  原地重命名项目，并结束旧 tmux 会话
+
+维护
+  repo                设置、克隆或拉取 ARIS Codex skills 仓库；支持非交互 setup
+  update              拉取 ARIS_REPO，并收敛所有项目的 Codex skill 链接
+  base-init           从模板和共享技能物化 base 环境
+                      --force-templates 会刷新内置技能模板
+  doctor              检查项目、工作区和外部工具；支持 --json
+  audit               只读审计 CLI、文档和 base 技能是否同步
+  purge               永久删除超过 N 天的回收站条目，默认 30 天
+
+帮助
+  help                显示本帮助
+  <subcommand> --help 显示子命令帮助
+
+快速示例
+  arisc repo                                  # 首次配置：克隆 ARIS Codex skills 并持久化
+  arisc new llm-tokenizer                     # 创建项目
+  arisc fork ailab                            # 从已有研究工作区导入项目
+  arisc goal llm-tokenizer -- "更新简报并推进下一步实验" # 自动投递 /goal
+  arisc auto llm-tokenizer -- "自动推进并输出 base 监控摘要"
+  arisc auto --snapshot llm-tokenizer -- "自动推进并保存 base 接管快照"
+  arisc base                                  # base 视角输出一屏工作区总览
+  arisc base agenda                           # base 视角生成接管议程
+  arisc base summary                          # base 视角输出接管短摘要
+  arisc base summary --json                   # 输出机器可读接管摘要
+  arisc base report --with-agenda             # base 视角生成交接报告
+  arisc base snapshot                         # 保存交接报告、诊断、环境导出和状态 JSON 快照
+  arisc status                                  # 输出一屏工作区总览
+  arisc status --json                           # 输出机器可读工作区总览
+  arisc goal --status --json                    # 输出机器可读 goal 状态
+  arisc alerts                                  # 查看需要人工关注的项目
+  arisc alerts --summary                        # 查看告警数量摘要
+  arisc alerts --only blocked                   # 只查看阻塞项目
+  arisc alerts --sort name                      # 按项目名排序告警
+  arisc agenda                                  # 生成只读接管议程
+  arisc agenda --json                           # 输出机器可读接管议程
+  arisc triage                                  # 汇总需要接管的项目诊断
+  arisc triage --sort name                      # 按项目名排序接管诊断
+  arisc triage --save                           # 保存一份接管诊断到 reports/
+  arisc report                                # 生成当前工作区交接报告
+  arisc reports                               # 查看已保存的交接报告
+  arisc reports --type triage                 # 查看已保存的接管诊断
+	  arisc reports --type env                    # 查看已保存的环境导出
+	  arisc reports --type snapshot               # 查看已保存的 base 快照索引
+	  arisc reports --type status                 # 查看 base snapshot 保存的 status JSON
+	  arisc reports --type doctor                 # 查看 base snapshot 保存的 doctor JSON
+	  arisc reports --type audit                  # 查看 base snapshot 保存的 audit JSON
+	  arisc reports --type all --json             # 输出保存材料列表 JSON
+  arisc reports --path current                # 输出最新报告稳定路径
+  arisc watch                                 # 持续监控后台项目
+  arisc env list --json                       # 以 env 入口输出环境列表
+  arisc env create scratch                    # 以 env 入口创建新环境
+  arisc env fork ailab ailab-codex            # 以 env 入口从旧 workspace 迁移环境
+  arisc env export lora                       # 导出环境清单，不包含 .env 内容
+  arisc env export --all --save               # 保存全环境清单到 reports/
+  arisc info                                  # 输出工作区信息
+  arisc info lora                             # 输出单项目环境信息
+  arisc inspect api-agent                     # 只读诊断单个项目
+  eval "$(arisc activate lora)"               # 激活项目环境到当前 shell
+  arisc run lora -- python -V                 # 在项目环境中执行命令
+  arisc send llm-tokenizer -- "继续整理实验计划" # 向运行中的项目发送一次性指令
+  arisc repair lora                           # 修复已存在项目的 Codex 骨架
+  arisc enter llm-tokenizer                   # 在 tmux 中启动或连接 Codex
+  arisc ls                                    # 查看项目和 tmux 状态
+  arisc ls --json                             # 输出机器可读环境列表
+  cd $(arisc path llm-tokenizer)              # 进入项目目录
+  arisc del llm-tokenizer                     # 软删除，默认需要确认
+  arisc restore llm-tokenizer                 # 恢复软删除项目
+  arisc update                                # 拉取上游并收敛所有项目
+  arisc doctor                                # 检查悬空链接和缺失文件
+  arisc doctor --json                         # 输出机器可读检查结果
+  arisc audit                                 # 审计命令、文档和 base 技能同步情况
+  arisc purge --older-than 7                  # 清理旧回收站条目
+
+tmux 常用操作
+  Ctrl+B D       在 tmux 内分离，Codex 继续后台运行
+  arisc enter X  重新连接已分离会话
+  arisc enter --list / --kill <slug>
+
+环境变量覆盖
+  WORKSPACE_ROOT  默认：~/arisc
+  ARIS_REPO       默认：~/work/aris-codex-skills
+                  也会读取 `arisc repo` 写入的 $WORKSPACE_ROOT/config
+  CODEX_BIN       默认：codex；用于 arisc enter / arisc goal 启动 Codex
+
+平台
+  Linux、macOS 和 WSL2；需要 Bash 4.4+
+  macOS 请先运行：brew install bash jq tmux uv
+EOF
+}
+
+if [[ ${1:-} == "--version" || ${1:-} == "-V" || ${1:-} == "version" ]]; then
+  VERSION_FILE="$DISPATCH_DIR/../VERSION"
+  printf 'arisc %s\n' "$(cat "$VERSION_FILE" 2>/dev/null || echo dev)"
+  exit 0
+fi
+
+if [[ $# -lt 1 ]]; then
+  print_help >&2
+  exit 2
+fi
+
+sub="$1"; shift
+
+case "$sub" in
+  help|--help|-h)
+    print_help
+    exit 0
+    ;;
+  new|fork|goal|auto|base|status|alerts|agenda|triage|report|reports|watch|info|inspect|env|repair|activate|run|send|tail|ls|enter|del|restore|rename|path|repo|update|doctor|audit|purge|happy|base-init)
+    target="$DISPATCH_DIR/aris-$sub"
+    if [[ ! -x "$target" ]]; then
+      echo "[ERROR] $target 缺失或不可执行" >&2
+      exit 1
+    fi
+    exec "$target" "$@"
+    ;;
+  *)
+    echo "[ERROR] 未知子命令：$sub" >&2
+    echo "" >&2
+    print_help >&2
+    exit 2
+    ;;
+esac

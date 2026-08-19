@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# aris-update：拉取 ARIS 上游并收敛每个项目的 Codex 技能链接。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+if [[ -z "${ARIS_REPO:-}" && -f "$WORKSPACE_ROOT/config" ]]; then
+  # shellcheck disable=SC1090
+  source "$WORKSPACE_ROOT/config"
+fi
+ARIS_REPO="${ARIS_REPO:-$HOME/work/aris-codex-skills}"
+
+require_codex_repo() {
+  if [[ ! -d "$ARIS_REPO" ]]; then
+    echo "[ERROR] ARIS_REPO 不存在：$ARIS_REPO" >&2
+    echo "        先运行：arisc repo" >&2
+    echo "        或临时指定：ARIS_REPO=/path/to/Auto-claude-code-research-in-sleep arisc update" >&2
+    exit 1
+  fi
+  if [[ ! -x "$ARIS_REPO/tools/install_aris_codex.sh" ]]; then
+    echo "[ERROR] 缺少安装器：$ARIS_REPO/tools/install_aris_codex.sh" >&2
+    echo "        请确认 ARIS_REPO 指向包含 tools/install_aris_codex.sh 的上游仓库。" >&2
+    exit 1
+  fi
+  if [[ ! -d "$ARIS_REPO/skills/skills-codex" ]]; then
+    echo "[ERROR] ARIS_REPO 缺少 skills/skills-codex：$ARIS_REPO" >&2
+    echo "        请运行 arisc repo 重新配置上游仓库。" >&2
+    exit 1
+  fi
+}
+
+usage() {
+  cat >&2 <<'EOF'
+用法：arisc update [--repo-only] [--projects-only]
+
+  --repo-only        只在 ARIS_REPO 中执行 git pull，跳过项目收敛
+  --projects-only    只收敛每个项目，跳过 git pull
+
+默认：先 git pull，再对每个项目执行 install_aris_codex.sh 自动安装/收敛。
+EOF
+  exit 2
+}
+
+REPO_ONLY=false
+PROJECTS_ONLY=false
+for arg in "$@"; do
+  case "$arg" in
+    --repo-only) REPO_ONLY=true ;;
+    --projects-only) PROJECTS_ONLY=true ;;
+    --help|-h) usage ;;
+    *) echo "[ERROR] 未知参数：$arg" >&2; usage ;;
+  esac
+done
+if $REPO_ONLY && $PROJECTS_ONLY; then
+  echo "[ERROR] --repo-only 和 --projects-only 不能同时使用" >&2
+  exit 2
+fi
+
+if ! $PROJECTS_ONLY; then
+  echo "[INFO] 1/2 拉取上游：$ARIS_REPO"
+  require_codex_repo
+  if [[ ! -d "$ARIS_REPO/.git" ]]; then
+    echo "[ERROR] $ARIS_REPO 不是 Git 仓库，请先运行：arisc repo" >&2
+    exit 1
+  fi
+  git -C "$ARIS_REPO" pull --ff-only
+fi
+
+if ! $REPO_ONLY; then
+  echo ""
+  echo "[INFO] 2/2 收敛项目 Codex 技能"
+  PROJECTS_DIR="$WORKSPACE_ROOT/projects"
+  if [[ ! -d "$PROJECTS_DIR" ]]; then
+    echo "[INFO] 暂无项目"
+    exit 0
+  fi
+  shopt -s nullglob
+  projs=("$PROJECTS_DIR"/*/)
+  shopt -u nullglob
+  if [[ ${#projs[@]} -eq 0 ]]; then
+    echo "[INFO] 暂无项目"
+    exit 0
+  fi
+
+  require_codex_repo
+
+  failed=()
+  for p in "${projs[@]}"; do
+    name=$(basename "$p")
+    printf "[INFO] %-30s " "$name"
+    mkdir -p "${p%/}/.codex"
+    LOG=$(mktemp)
+    if bash "$ARIS_REPO/tools/install_aris_codex.sh" "${p%/}" --quiet >"$LOG" 2>&1; then
+      legacy_manifest="${p%/}/.aris/installed-skills.txt"
+      if [[ -f "$legacy_manifest" ]]; then
+        rm -f "$legacy_manifest"
+        echo "ok，已清理旧 manifest"
+      else
+        echo "ok"
+      fi
+      rm -f "$LOG"
+    else
+      echo "失败，日志保留在 $LOG"
+      failed+=("$name")
+    fi
+  done
+  if [[ ${#failed[@]} -gt 0 ]]; then
+    echo ""
+    echo "[ERROR] 收敛失败：${failed[*]}"
+    exit 1
+  fi
+fi
+
+echo ""
+echo "[OK] update 完成"

@@ -1,0 +1,41 @@
+name: Bug report
+description: Report reproducible ARISC behavior that is incorrect or unsafe.
+title: "[Bug]: "
+labels: [bug, triage]
+body:
+  - type: markdown
+    attributes:
+      value: "Thanks for helping improve ARISC. Never paste secrets or `.env` contents."
+  - type: input
+    id: version
+    attributes:
+      label: ARISC version
+      description: Output of `arisc --version`.
+      placeholder: arisc 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      placeholder: Ubuntu 24.04, WSL2, Bash 5.2
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Minimal commands and sanitized inputs that reproduce the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Relevant output from `arisc doctor` or `arisc inspect`; remove private data.

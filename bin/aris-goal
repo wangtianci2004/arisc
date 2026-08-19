@@ -1,0 +1,892 @@
+#!/usr/bin/env bash
+# aris-goal：向项目 Codex 会话投递 /goal，让项目在 tmux 后台持续执行。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+TMUX_PREFIX="aris-codex"
+CODEX_BIN="${CODEX_BIN:-codex}"
+SEND_DELAY="${ARIS_GOAL_SEND_DELAY:-2}"
+SLUG_RE='^[a-z0-9]+(-[a-z0-9]+)*$'
+
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+  local code="${1:-2}"
+  cat >&2 <<'EOF'
+用法：
+  arisc goal <slug> [选项] -- <目标文本...>
+  arisc goal <slug> <目标文本...>
+  arisc goal --batch FILE|- [--dry-run] [--create] [--resume] [--continue-on-error]
+  arisc goal --list
+  arisc goal --status [--json] [slug]
+  arisc goal --alerts [--json] [--summary] [--sort severity|name] [--only blocked|attention|waiting|stopped] [--pane-lines N]
+  arisc goal --peek <slug> [N]
+  arisc goal --show <slug>
+
+作用：
+  向项目 Codex 会话投递 `/goal <目标文本>`，让 Codex 在 tmux 后台持续执行。
+  适合把一个科研环境交给 Codex 自动推进，再从 base 用 arisc ls、/aris-status
+  或 /aris-send 监控和干预。
+
+选项：
+  --create     如果项目不存在，先执行 arisc new <slug>
+  --new        没有 tmux 会话时启动新 Codex 会话，默认行为
+  --resume     没有 tmux 会话时执行 codex resume --last，然后投递 /goal
+  --attach     投递后直接连接 tmux 会话
+  --dry-run    只展示将执行的动作，不创建项目、不启动会话、不发送消息
+  --batch FILE 从文件批量投递 goal；传 - 时从标准输入读取
+  --continue-on-error 与 --batch 配合，单个项目投递失败时继续处理后续项目，最后汇总失败
+  --list       列出项目最近投递的 ARIS goal
+  --status     显示最近 goal、tmux 状态和疑似等待人工输入的项目；加 --json 输出机器可读 JSON
+  --alerts     只显示 blocked、attention、waiting 或 stopped 的项目；加 --json 输出机器可读 JSON
+  --summary    与 --alerts 配合，只输出数量摘要；与 --json 配合时追加 summary 字段
+  --sort X     与 --alerts 配合，按 severity 或 name 排序；默认 severity
+  --only X     与 --alerts 配合，只显示 blocked、attention、waiting 或 stopped 中的一类
+  --pane-lines N 与 --alerts 配合，在文本输出中附加每个运行中告警 pane 末尾 N 行
+  --peek <slug> [N] 查看目标 tmux pane 末尾 N 行，默认 40
+  --show <slug> 显示某个项目最近投递的 goal 全文
+
+示例：
+  arisc goal ailab -- "持续整理当前研究方向，先更新 RESEARCH_BRIEF.md，再给出下一步实验计划"
+  arisc goal new-idea --create -- "阅读简报并执行 /research-pipeline"
+  arisc goal ailab --resume -- "继续上次工作，把未完成实验补齐"
+  arisc goal --batch goals.tsv --dry-run
+  printf 'foo\t持续推进当前目标\n' | arisc goal --batch - --dry-run
+  arisc goal --batch goals.tsv --continue-on-error
+EOF
+  exit "$code"
+}
+
+goal_state_file() {
+  printf '%s/projects/%s/.codex/aris-goal.tsv\n' "$WORKSPACE_ROOT" "$1"
+}
+
+goal_markdown_file() {
+  printf '%s/projects/%s/.codex/aris-goal.md\n' "$WORKSPACE_ROOT" "$1"
+}
+
+read_state_field() {
+  local file="$1" key="$2"
+  [[ -f "$file" ]] || return 0
+  sed -n "s/^${key}	//p" "$file" | head -1
+}
+
+project_slugs() {
+  local projects_dir="$WORKSPACE_ROOT/projects"
+  [[ -d "$projects_dir" ]] || return 0
+  shopt -s nullglob
+  local proj_dir
+  for proj_dir in "$projects_dir"/*/; do
+    [[ -d "$proj_dir" ]] || continue
+    basename "$proj_dir"
+  done | sort
+  shopt -u nullglob
+}
+
+pane_target() {
+  printf '=%s:0.0\n' "$1"
+}
+
+canonical_dir() {
+  (cd "$1" 2>/dev/null && pwd -P) || return 1
+}
+
+ensure_session_matches_project() {
+  local session="$1" project_dir="$2" session_cwd expected actual
+  session_cwd="$(tmux display-message -p -t "$(pane_target "$session")" '#{pane_current_path}' 2>/dev/null || true)"
+  if [[ -z "$session_cwd" ]]; then
+    echo "[ERROR] 无法读取 tmux pane 当前目录，拒绝操作：$session" >&2
+    exit 1
+  fi
+  if ! expected="$(canonical_dir "$project_dir")"; then
+    echo "[ERROR] 无法解析当前项目目录，拒绝操作：$project_dir" >&2
+    exit 1
+  fi
+  if ! actual="$(canonical_dir "$session_cwd")"; then
+    echo "[ERROR] 无法解析 tmux pane 当前目录，拒绝操作：$session_cwd" >&2
+    exit 1
+  fi
+  if [[ "$actual" != "$expected" ]]; then
+    echo "[ERROR] 已存在同名 tmux 会话，但它不属于当前项目目录：$session" >&2
+    echo "        当前项目：$expected" >&2
+    echo "        会话目录：$actual" >&2
+    echo "        为避免跨 workspace 误投递，已拒绝发送 /goal。" >&2
+    exit 1
+  fi
+}
+
+session_matches_project() {
+  local session="$1" project_dir="$2" session_cwd expected actual
+  session_cwd="$(tmux display-message -p -t "$(pane_target "$session")" '#{pane_current_path}' 2>/dev/null || true)"
+  [[ -n "$session_cwd" ]] || return 1
+  expected="$(canonical_dir "$project_dir")" || return 1
+  actual="$(canonical_dir "$session_cwd")" || return 1
+  [[ "$actual" == "$expected" ]]
+}
+
+project_session_running() {
+  local slug="$1" session="$TMUX_PREFIX-$slug" project_dir="$WORKSPACE_ROOT/projects/$slug"
+  command -v tmux >/dev/null || return 1
+  tmux has-session -t "=$session" 2>/dev/null || return 1
+  session_matches_project "$session" "$project_dir"
+}
+
+capture_pane_tail() {
+  local session="$1" lines="${2:-40}"
+  [[ "$lines" =~ ^[0-9]+$ ]] || lines=40
+  (( lines > 0 )) || lines=40
+  tmux capture-pane -t "$(pane_target "$session")" -p -S -2000 \
+    | awk 'NF { last = NR } { buf[NR] = $0 } END { for (i = 1; i <= last; i++) print buf[i] }' \
+    | tail -n "$lines"
+}
+
+classify_pane() {
+  local pane_text="$1"
+  if [[ -z "$pane_text" ]]; then
+    echo "blank"
+  elif printf '%s\n' "$pane_text" | grep -Eiq 'Goal blocked|blocked \(/goal|目标阻塞|已阻塞'; then
+    echo "blocked"
+  elif printf '%s\n' "$pane_text" | grep -Eiq 'Reconnecting|Stream disconnected|rate limit|network|连接中断|重连'; then
+    echo "attention"
+  elif printf '%s\n' "$pane_text" | grep -Eiq 'error|failed|exception|traceback|panic|失败|错误|异常'; then
+    echo "attention"
+  elif printf '%s\n' "$pane_text" | grep -Eiq 'Pursuing goal|esc to interrupt|Updated Plan|Exploring|Running|Thinking|正在|执行中'; then
+    echo "running"
+  elif printf '%s\n' "$pane_text" | grep -Eiq 'approval required|approve\?|allow\?|confirm\?|press enter|y/n|yes/no|是否继续|确认执行|允许执行|等待确认|批准'; then
+    echo "waiting"
+  else
+    echo "active"
+  fi
+}
+
+json_escape() {
+  local s="${1:-}"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\b'/\\b}
+  s=${s//$'\f'/\\f}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+goal_status_values() {
+  local slug="$1" state created mode session preview tmux_state pane_status pane_tail project_dir
+  state="$(goal_state_file "$slug")"
+  project_dir="$WORKSPACE_ROOT/projects/$slug"
+  created="$(read_state_field "$state" created_at)"
+  mode="$(read_state_field "$state" mode)"
+  session="$(read_state_field "$state" session)"
+  preview="$(read_state_field "$state" goal_preview)"
+  [[ -n "$session" ]] || session="$TMUX_PREFIX-$slug"
+
+  tmux_state="-"
+  pane_status="-"
+  if command -v tmux >/dev/null && tmux has-session -t "=$session" 2>/dev/null && session_matches_project "$session" "$project_dir"; then
+    tmux_state="running"
+    pane_tail="$(capture_pane_tail "$session" 30 2>/dev/null || true)"
+    pane_status="$(classify_pane "$pane_tail")"
+  elif [[ -f "$state" ]]; then
+    tmux_state="stopped"
+  fi
+
+  if [[ ! -f "$state" && "$tmux_state" == "running" ]]; then
+    mode="external"
+    created="-"
+    preview="运行中，无 ARIS goal 记录"
+  else
+    [[ -n "$mode" ]] || mode="-"
+    [[ -n "$created" ]] || created="-"
+    [[ -n "$preview" ]] || preview="-"
+  fi
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$slug" "$tmux_state" "${pane_status:-?}" "${mode:-?}" "${created:-?}" "${preview:-}"
+}
+
+goal_status_for_slug() {
+  local slug="$1" row tmux_state pane_status mode created preview
+  row="$(goal_status_values "$slug")"
+  IFS=$'\t' read -r _ tmux_state pane_status mode created preview <<< "$row"
+  printf "%-28s %-8s %-10s %-10s %-25s %s\n" "$slug" "$tmux_state" "${pane_status:-?}" "${mode:-?}" "${created:-?}" "${preview:-}"
+}
+
+alert_pane_tail() {
+  local slug="$1" lines="${2:-0}" session project_dir
+  [[ "$lines" =~ ^[0-9]+$ && "$lines" -gt 0 ]] || return 0
+  command -v tmux >/dev/null || return 0
+  session="$(read_state_field "$(goal_state_file "$slug")" session)"
+  [[ -n "$session" ]] || session="$TMUX_PREFIX-$slug"
+  project_dir="$WORKSPACE_ROOT/projects/$slug"
+  tmux has-session -t "=$session" 2>/dev/null || return 0
+  session_matches_project "$session" "$project_dir" || return 0
+  capture_pane_tail "$session" "$lines"
+}
+
+goal_status_json_for_slug() {
+  local slug="$1" pane_lines="${2:-0}" row tmux_state pane_status mode created preview state session project_dir has_goal_record alert pane_tail
+  row="$(goal_status_values "$slug")"
+  IFS=$'\t' read -r _ tmux_state pane_status mode created preview <<< "$row"
+  state="$(goal_state_file "$slug")"
+  project_dir="$WORKSPACE_ROOT/projects/$slug"
+  session="$(read_state_field "$state" session)"
+  [[ -n "$session" ]] || session="$TMUX_PREFIX-$slug"
+  has_goal_record=false
+  [[ -f "$state" ]] && has_goal_record=true
+  alert=false
+  is_alert_status "$tmux_state" "$pane_status" "" && alert=true
+  printf '{"slug":"%s","tmux_state":"%s","pane_status":"%s","mode":"%s","created_at":"%s","goal_preview":"%s","session_name":"%s","project_dir":"%s","has_goal_record":%s,"alert":%s' \
+    "$(json_escape "$slug")" \
+    "$(json_escape "$tmux_state")" \
+    "$(json_escape "$pane_status")" \
+    "$(json_escape "$mode")" \
+    "$(json_escape "$created")" \
+    "$(json_escape "$preview")" \
+    "$(json_escape "$session")" \
+    "$(json_escape "$project_dir")" \
+    "$has_goal_record" \
+    "$alert"
+  if [[ "$pane_lines" =~ ^[0-9]+$ && "$pane_lines" -gt 0 ]]; then
+    pane_tail="$(alert_pane_tail "$slug" "$pane_lines" 2>/dev/null || true)"
+    printf ',"pane_tail":"%s"' "$(json_escape "$pane_tail")"
+  fi
+  printf '}'
+}
+
+list_goals() {
+  local projects_dir="$WORKSPACE_ROOT/projects"
+  [[ -d "$projects_dir" ]] || { echo "[INFO] 还没有项目：$projects_dir"; return 0; }
+
+  printf "%-28s %-25s %-10s %-8s %s\n" "环境" "最近投递" "模式" "会话" "目标摘要"
+  printf "%-28s %-25s %-10s %-8s %s\n" "---" "--------" "----" "----" "----"
+
+  shopt -s nullglob
+  local proj_dir state slug created mode session tmux_state preview
+  for proj_dir in "$projects_dir"/*/; do
+    [[ -d "$proj_dir" ]] || continue
+    slug="$(basename "$proj_dir")"
+    state="$(goal_state_file "$slug")"
+    [[ -f "$state" ]] || continue
+    created="$(read_state_field "$state" created_at)"
+    mode="$(read_state_field "$state" mode)"
+    session="$(read_state_field "$state" session)"
+    preview="$(read_state_field "$state" goal_preview)"
+    tmux_state="-"
+    [[ -n "$session" ]] || session="$TMUX_PREFIX-$slug"
+    if command -v tmux >/dev/null && tmux has-session -t "=$session" 2>/dev/null && session_matches_project "$session" "${proj_dir%/}"; then
+      tmux_state="running"
+    fi
+    printf "%-28s %-25s %-10s %-8s %s\n" "$slug" "${created:-?}" "${mode:-?}" "$tmux_state" "$preview"
+  done
+  shopt -u nullglob
+}
+
+status_goals() {
+  local only_slug="${1:-}"
+  if [[ -n "$only_slug" ]]; then
+    [[ "$only_slug" =~ $SLUG_RE ]] || { echo "[ERROR] slug 必须是 kebab-case：$only_slug" >&2; exit 1; }
+    [[ -d "$WORKSPACE_ROOT/projects/$only_slug" ]] || { echo "[ERROR] 不存在项目：$WORKSPACE_ROOT/projects/$only_slug" >&2; exit 1; }
+  fi
+
+  printf "%-28s %-8s %-10s %-10s %-25s %s\n" "环境" "会话" "pane" "模式" "最近投递" "目标摘要"
+  printf "%-28s %-8s %-10s %-10s %-25s %s\n" "---" "----" "----" "----" "--------" "----"
+  if [[ -n "$only_slug" ]]; then
+    goal_status_for_slug "$only_slug"
+    return 0
+  fi
+
+  local slug
+  while IFS= read -r slug; do
+    [[ -n "$slug" ]] || continue
+    if [[ -f "$(goal_state_file "$slug")" ]] || project_session_running "$slug"; then
+      goal_status_for_slug "$slug"
+    fi
+  done < <(project_slugs)
+}
+
+status_goals_json() {
+  local only_slug="${1:-}"
+  if [[ -n "$only_slug" ]]; then
+    [[ "$only_slug" =~ $SLUG_RE ]] || { echo "[ERROR] slug 必须是 kebab-case：$only_slug" >&2; exit 1; }
+    [[ -d "$WORKSPACE_ROOT/projects/$only_slug" ]] || { echo "[ERROR] 不存在项目：$WORKSPACE_ROOT/projects/$only_slug" >&2; exit 1; }
+  fi
+
+  printf '{"workspace_root":"%s","generated_at":"%s","items":[' "$(json_escape "$WORKSPACE_ROOT")" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  local first=true slug
+  if [[ -n "$only_slug" ]]; then
+    goal_status_json_for_slug "$only_slug"
+  else
+    while IFS= read -r slug; do
+      [[ -n "$slug" ]] || continue
+      if [[ -f "$(goal_state_file "$slug")" ]] || project_session_running "$slug"; then
+        if $first; then
+          first=false
+        else
+          printf ','
+        fi
+        goal_status_json_for_slug "$slug"
+      fi
+    done < <(project_slugs)
+  fi
+  printf ']}\n'
+}
+
+is_alert_status() {
+  local tmux_state="$1" pane_status="$2" only="${3:-}"
+  case "$only" in
+    "") [[ "$pane_status" == "blocked" || "$pane_status" == "attention" || "$pane_status" == "waiting" || "$tmux_state" == "stopped" ]] ;;
+    stopped) [[ "$tmux_state" == "stopped" ]] ;;
+    blocked|attention|waiting) [[ "$pane_status" == "$only" ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+alert_rank() {
+  local tmux_state="$1" pane_status="$2"
+  case "$pane_status" in
+    blocked) echo 1 ;;
+    waiting) echo 2 ;;
+    attention) echo 3 ;;
+    *)
+      if [[ "$tmux_state" == "stopped" ]]; then
+        echo 4
+      else
+        echo 9
+      fi
+      ;;
+  esac
+}
+
+alert_records() {
+  local only="${1:-}" sort_mode="${2:-severity}"
+  local slug row tmux_state pane_status mode created preview rank
+  {
+    while IFS= read -r slug; do
+      [[ -n "$slug" ]] || continue
+      if [[ -f "$(goal_state_file "$slug")" ]] || project_session_running "$slug"; then
+        row="$(goal_status_values "$slug")"
+        IFS=$'\t' read -r _ tmux_state pane_status mode created preview <<< "$row"
+        if is_alert_status "$tmux_state" "$pane_status" "$only"; then
+          rank="$(alert_rank "$tmux_state" "$pane_status")"
+          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$rank" "$slug" "$tmux_state" "${pane_status:-?}" "${mode:-?}" "${created:-?}" "${preview:-}"
+        fi
+      fi
+    done < <(project_slugs)
+  } | if [[ "$sort_mode" == "name" ]]; then
+        sort -t $'\t' -k2,2
+      else
+        sort -t $'\t' -n -k1,1 -k2,2
+      fi
+}
+
+status_alerts() {
+  local only="${1:-}" pane_lines="${2:-0}" sort_mode="${3:-severity}" found=false record rank slug tmux_state pane_status mode created preview pane_tail
+  printf "%-28s %-8s %-10s %-10s %-25s %s\n" "环境" "会话" "pane" "模式" "最近投递" "目标摘要"
+  printf "%-28s %-8s %-10s %-10s %-25s %s\n" "---" "----" "----" "----" "--------" "----"
+  while IFS=$'\t' read -r rank slug tmux_state pane_status mode created preview; do
+    [[ -n "$slug" ]] || continue
+    found=true
+    printf "%-28s %-8s %-10s %-10s %-25s %s\n" "$slug" "$tmux_state" "${pane_status:-?}" "${mode:-?}" "${created:-?}" "${preview:-}"
+    if [[ "$pane_lines" =~ ^[0-9]+$ && "$pane_lines" -gt 0 && "$tmux_state" == "running" ]]; then
+      pane_tail="$(alert_pane_tail "$slug" "$pane_lines" 2>/dev/null || true)"
+      if [[ -n "$pane_tail" ]]; then
+        echo "  pane 末尾 ${pane_lines} 行："
+        printf '%s\n' "$pane_tail" | sed 's/^/    /'
+      fi
+    fi
+  done < <(alert_records "$only" "$sort_mode")
+
+  if ! $found; then
+    if [[ -n "$only" ]]; then
+      echo "(当前没有 $only 项目)"
+    else
+      echo "(当前没有 blocked、attention、waiting 或 stopped 的项目)"
+    fi
+  else
+    echo ""
+    echo "接管命令：arisc goal --peek <slug> 40；arisc enter <slug>；arisc send <slug> --dry-run -- <message>"
+  fi
+}
+
+status_alerts_json() {
+  local only="${1:-}" pane_lines="${2:-0}" include_summary="${3:-false}" sort_mode="${4:-severity}"
+  printf '{"workspace_root":"%s","generated_at":"%s"' "$(json_escape "$WORKSPACE_ROOT")" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  local first=true rank slug tmux_state pane_status mode created preview total=0 blocked=0 attention=0 waiting=0 stopped=0
+  local -a item_json=()
+  while IFS=$'\t' read -r rank slug tmux_state pane_status mode created preview; do
+    [[ -n "$slug" ]] || continue
+    total=$((total + 1))
+    case "$pane_status" in
+      blocked) blocked=$((blocked + 1)) ;;
+      attention) attention=$((attention + 1)) ;;
+      waiting) waiting=$((waiting + 1)) ;;
+    esac
+    if [[ "$tmux_state" == "stopped" ]]; then
+      stopped=$((stopped + 1))
+    fi
+    item_json+=("$(goal_status_json_for_slug "$slug" "$pane_lines")")
+  done < <(alert_records "$only" "$sort_mode")
+  if $include_summary; then
+    printf ',"summary":{"total":%s,"blocked":%s,"attention":%s,"waiting":%s,"stopped":%s}' \
+      "$total" "$blocked" "$attention" "$waiting" "$stopped"
+  fi
+  printf ',"items":['
+  for item in "${item_json[@]}"; do
+    if $first; then
+      first=false
+    else
+      printf ','
+    fi
+    printf '%s' "$item"
+  done
+  printf ']}\n'
+}
+
+status_alerts_summary() {
+  local only="${1:-}" slug row tmux_state pane_status mode created preview
+  local total=0 blocked=0 attention=0 waiting=0 stopped=0
+  while IFS= read -r slug; do
+    [[ -n "$slug" ]] || continue
+    if [[ -f "$(goal_state_file "$slug")" ]] || project_session_running "$slug"; then
+      row="$(goal_status_values "$slug")"
+      IFS=$'\t' read -r _ tmux_state pane_status mode created preview <<< "$row"
+      if is_alert_status "$tmux_state" "$pane_status" "$only"; then
+        total=$((total + 1))
+        case "$pane_status" in
+          blocked) blocked=$((blocked + 1)) ;;
+          attention) attention=$((attention + 1)) ;;
+          waiting) waiting=$((waiting + 1)) ;;
+        esac
+        if [[ "$tmux_state" == "stopped" ]]; then
+          stopped=$((stopped + 1))
+        fi
+      fi
+    fi
+  done < <(project_slugs)
+
+  echo "# ARIS-Codex 告警摘要"
+  echo ""
+  echo "- 生成时间：$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  echo "- 工作区：$WORKSPACE_ROOT"
+  if [[ -n "$only" ]]; then
+    echo "- 筛选：$only"
+  else
+    echo "- 筛选：blocked、attention、waiting、stopped"
+  fi
+  echo ""
+  printf "%-12s %s\n" "类型" "数量"
+  printf "%-12s %s\n" "----" "----"
+  printf "%-12s %s\n" "total" "$total"
+  printf "%-12s %s\n" "blocked" "$blocked"
+  printf "%-12s %s\n" "attention" "$attention"
+  printf "%-12s %s\n" "waiting" "$waiting"
+  printf "%-12s %s\n" "stopped" "$stopped"
+}
+
+peek_goal() {
+  local slug="$1" lines="${2:-40}" session
+  [[ "$slug" =~ $SLUG_RE ]] || { echo "[ERROR] slug 必须是 kebab-case：$slug" >&2; exit 1; }
+  [[ -d "$WORKSPACE_ROOT/projects/$slug" ]] || { echo "[ERROR] 不存在项目：$WORKSPACE_ROOT/projects/$slug" >&2; exit 1; }
+  session="$(read_state_field "$(goal_state_file "$slug")" session)"
+  [[ -n "$session" ]] || session="$TMUX_PREFIX-$slug"
+  if ! tmux has-session -t "=$session" 2>/dev/null; then
+    echo "[ERROR] tmux 会话未运行：$session" >&2
+    exit 1
+  fi
+  ensure_session_matches_project "$session" "$WORKSPACE_ROOT/projects/$slug"
+  echo "==> $session pane 末尾 ${lines:-40} 行"
+  capture_pane_tail "$session" "$lines"
+}
+
+show_goal() {
+  local slug="$1"
+  local md
+  md="$(goal_markdown_file "$slug")"
+  [[ -f "$md" ]] || { echo "[ERROR] 没有找到 goal 记录：$md" >&2; exit 1; }
+  sed -n '1,220p' "$md"
+}
+
+write_goal_state() {
+  local slug="$1" mode="$2" session="$3" goal_text="$4"
+  local project_dir="$WORKSPACE_ROOT/projects/$slug"
+  local created_at preview state md
+  created_at="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  preview="$(printf '%s' "$goal_text" | tr '\t\n' '  ' | sed 's/  */ /g' | cut -c1-120)"
+  state="$(goal_state_file "$slug")"
+  md="$(goal_markdown_file "$slug")"
+
+  mkdir -p "$project_dir/.codex"
+  {
+    printf 'created_at\t%s\n' "$created_at"
+    printf 'mode\t%s\n' "$mode"
+    printf 'session\t%s\n' "$session"
+    printf 'goal_preview\t%s\n' "$preview"
+  } > "$state"
+
+  {
+    printf '# ARIS Goal\n\n'
+    printf -- '- 创建时间：%s\n' "$created_at"
+    printf -- '- 投递方式：%s\n' "$mode"
+    printf -- '- tmux 会话：%s\n' "$session"
+    printf -- '- 工作目录：%s\n\n' "$project_dir"
+    printf '## 目标\n\n'
+    printf '%s\n' "$goal_text"
+  } > "$md"
+}
+
+send_goal_prompt() {
+  local session="$1" prompt="$2"
+  local pane
+  pane="=$session:0.0"
+  tmux send-keys -t "$pane" C-u
+  tmux send-keys -t "$pane" -- "$prompt"
+  tmux send-keys -t "$pane" Enter
+}
+
+dispatch_goal() {
+  local slug="$1" goal_text="$2" create="$3" resume="$4" dry_run="$5"
+  local goal_prompt project_dir tmux_session mode codex_cmd
+
+  if ! [[ "$slug" =~ $SLUG_RE ]]; then
+    echo "[ERROR] slug 必须是 kebab-case：$slug" >&2
+    exit 1
+  fi
+  if [[ "$slug" == "base" ]]; then
+    echo "[ERROR] goal 目标必须是普通项目；base 用于监控和调度" >&2
+    exit 1
+  fi
+
+  goal_prompt="/goal $goal_text"
+  project_dir="$WORKSPACE_ROOT/projects/$slug"
+  tmux_session="$TMUX_PREFIX-$slug"
+
+  command -v tmux >/dev/null || { echo "[ERROR] tmux 不在 PATH 中" >&2; exit 1; }
+  command -v "$CODEX_BIN" >/dev/null || { echo "[ERROR] $CODEX_BIN 不在 PATH 中" >&2; exit 1; }
+
+  if [[ ! -d "$project_dir" ]]; then
+    if ! $create; then
+      echo "[ERROR] 不存在项目：$project_dir" >&2
+      echo "        如需自动创建，请使用：arisc goal $slug --create -- <目标文本>" >&2
+      exit 1
+    fi
+    if $dry_run; then
+      echo "[DRY-RUN] 将创建项目：$slug"
+    else
+      "$SCRIPT_DIR/aris-new" "$slug"
+    fi
+  fi
+
+  mode="send"
+  codex_cmd=""
+  if tmux has-session -t "=$tmux_session" 2>/dev/null; then
+    ensure_session_matches_project "$tmux_session" "$project_dir"
+    mode="send"
+  else
+    if $resume; then
+      mode="resume"
+      codex_cmd="$(printf '%q' "$CODEX_BIN") resume --last"
+    else
+      mode="new"
+      codex_cmd="$(printf '%q' "$CODEX_BIN")"
+    fi
+  fi
+
+  echo "[INFO] 目标项目：$slug"
+  echo "[INFO] tmux 会话：$tmux_session"
+  echo "[INFO] 投递方式：$mode"
+  echo "[INFO] goal：$goal_text"
+
+  if $dry_run; then
+    if [[ "$mode" == "send" ]]; then
+      echo "[DRY-RUN] 将发送到已有会话：$tmux_session"
+    else
+      echo "[DRY-RUN] 将在 $project_dir 启动 detached tmux：$codex_cmd"
+    fi
+    return 0
+  fi
+
+  if [[ "$mode" == "send" ]]; then
+    send_goal_prompt "$tmux_session" "$goal_prompt"
+    write_goal_state "$slug" "$mode" "$tmux_session" "$goal_text"
+    echo "[OK] 已向已有会话投递 /goal"
+  else
+    tmux new-session -d -s "$tmux_session" -c "$project_dir" "$codex_cmd"
+    sleep "$SEND_DELAY"
+    if ! tmux has-session -t "=$tmux_session" 2>/dev/null; then
+      echo "[ERROR] Codex 会话启动后立即退出：$tmux_session" >&2
+      echo "        可手动检查：cd $project_dir && $codex_cmd" >&2
+      exit 1
+    fi
+    send_goal_prompt "$tmux_session" "$goal_prompt"
+    write_goal_state "$slug" "$mode" "$tmux_session" "$goal_text"
+    echo "[OK] 已启动后台 Codex 会话并投递 /goal"
+  fi
+}
+
+run_batch() {
+  local batch_file="$1" create="$2" resume="$3" dry_run="$4" continue_on_error="$5"
+  local line line_no slug goal tab code batch_label
+  local -a slugs=() goals=() failed_slugs=() failed_codes=()
+  tab=$'\t'
+
+  if [[ "$batch_file" == "-" ]]; then
+    batch_label="标准输入"
+  else
+    batch_label="$batch_file"
+    [[ -f "$batch_file" ]] || { echo "[ERROR] batch 文件不存在：$batch_file" >&2; exit 1; }
+  fi
+
+  line_no=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line_no=$((line_no + 1))
+    line="${line%$'\r'}"
+    [[ -z "${line//[[:space:]]/}" ]] && continue
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+
+    if [[ "$line" != *"$tab"* ]]; then
+      echo "[ERROR] batch 第 $line_no 行缺少 TAB 分隔符；格式应为：slug<TAB>目标文本" >&2
+      exit 2
+    fi
+    slug="${line%%$tab*}"
+    goal="${line#*$tab}"
+    if ! [[ "$slug" =~ $SLUG_RE ]]; then
+      echo "[ERROR] batch 第 $line_no 行 slug 必须是 kebab-case：$slug" >&2
+      exit 2
+    fi
+    if [[ "$slug" == "base" ]]; then
+      echo "[ERROR] batch 第 $line_no 行不能投递给 base" >&2
+      exit 2
+    fi
+    if [[ -z "${goal//[[:space:]]/}" ]]; then
+      echo "[ERROR] batch 第 $line_no 行目标文本为空：$slug" >&2
+      exit 2
+    fi
+    slugs+=("$slug")
+    goals+=("$goal")
+  done < <(
+    if [[ "$batch_file" == "-" ]]; then
+      cat
+    else
+      cat "$batch_file"
+    fi
+  )
+
+  if [[ ${#slugs[@]} -eq 0 ]]; then
+    echo "[ERROR] batch 文件没有可投递项目：$batch_file" >&2
+    exit 2
+  fi
+
+  echo "[INFO] 批量 goal 来源：$batch_label"
+  echo "[INFO] 待投递项目数：${#slugs[@]}"
+  if $dry_run; then
+    echo "[INFO] --dry-run：只预览，不创建项目、不启动会话、不发送消息"
+  fi
+  if $continue_on_error; then
+    echo "[INFO] --continue-on-error：单个项目失败时继续处理后续项目"
+  fi
+
+  local i
+  for i in "${!slugs[@]}"; do
+    echo ""
+    echo "==> 批量项 $((i + 1))/${#slugs[@]}：${slugs[$i]}"
+    if $continue_on_error; then
+      set +e
+      ( dispatch_goal "${slugs[$i]}" "${goals[$i]}" "$create" "$resume" "$dry_run" )
+      code=$?
+      set -e
+      if [[ "$code" -ne 0 ]]; then
+        failed_slugs+=("${slugs[$i]}")
+        failed_codes+=("$code")
+        echo "[WARN] 批量项失败，继续后续项目：${slugs[$i]}（退出码 ${code}）" >&2
+      fi
+    else
+      dispatch_goal "${slugs[$i]}" "${goals[$i]}" "$create" "$resume" "$dry_run"
+    fi
+  done
+
+  echo ""
+  if [[ ${#failed_slugs[@]} -gt 0 ]]; then
+    echo "[ERROR] batch 有 ${#failed_slugs[@]} 个项目失败" >&2
+    local j
+    for j in "${!failed_slugs[@]}"; do
+      echo "  - ${failed_slugs[$j]}：退出码 ${failed_codes[$j]}" >&2
+    done
+    echo "已处理其余项目；请修复失败项后重试。" >&2
+    exit 1
+  fi
+
+  if $dry_run; then
+    echo "[OK] batch dry-run 完成"
+  else
+    echo "[OK] batch 投递完成"
+    echo "监控：arisc goal --status；arisc alerts；arisc enter base"
+  fi
+}
+
+if [[ $# -lt 1 ]]; then
+  usage 2
+fi
+
+case "${1:-}" in
+  --help|-h)
+    usage 0
+    ;;
+  --batch)
+    shift
+    [[ $# -ge 1 ]] || usage 2
+    BATCH_FILE="$1"
+    shift
+    CREATE=false
+    RESUME=false
+    DRY_RUN=false
+    CONTINUE_ON_ERROR=false
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --create) CREATE=true; shift ;;
+        --new) RESUME=false; shift ;;
+        --resume) RESUME=true; shift ;;
+        --dry-run) DRY_RUN=true; shift ;;
+        --continue-on-error) CONTINUE_ON_ERROR=true; shift ;;
+        --attach) echo "[ERROR] --batch 不支持 --attach" >&2; exit 2 ;;
+        --help|-h) usage 0 ;;
+        *) echo "[ERROR] 未知 batch 参数：$1" >&2; usage 2 ;;
+      esac
+    done
+    run_batch "$BATCH_FILE" "$CREATE" "$RESUME" "$DRY_RUN" "$CONTINUE_ON_ERROR"
+    exit 0
+    ;;
+  --list)
+    list_goals
+    exit 0
+    ;;
+  --status)
+    shift
+    STATUS_JSON=false
+    STATUS_SLUG=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --json) STATUS_JSON=true; shift ;;
+        --help|-h) usage 0 ;;
+        *)
+          if [[ -n "$STATUS_SLUG" ]]; then
+            usage 2
+          fi
+          STATUS_SLUG="$1"
+          shift
+          ;;
+      esac
+    done
+    if $STATUS_JSON; then
+      status_goals_json "$STATUS_SLUG"
+    else
+      status_goals "$STATUS_SLUG"
+    fi
+    exit 0
+    ;;
+  --alerts)
+    shift
+    ALERTS_JSON=false
+    ALERTS_ONLY=""
+    ALERTS_PANE_LINES=0
+    ALERTS_SUMMARY=false
+    ALERTS_SORT="severity"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --json) ALERTS_JSON=true; shift ;;
+        --summary) ALERTS_SUMMARY=true; shift ;;
+        --sort)
+          [[ $# -ge 2 ]] || usage 2
+          case "$2" in
+            severity|name) ALERTS_SORT="$2" ;;
+            *) echo "[ERROR] --sort 只能是 severity 或 name：$2" >&2; exit 2 ;;
+          esac
+          shift 2
+          ;;
+        --only)
+          [[ $# -ge 2 ]] || usage 2
+          case "$2" in
+            blocked|attention|waiting|stopped) ALERTS_ONLY="$2" ;;
+            *) echo "[ERROR] --only 只能是 blocked、attention、waiting 或 stopped：$2" >&2; exit 2 ;;
+          esac
+          shift 2
+          ;;
+        --pane-lines)
+          [[ $# -ge 2 ]] || usage 2
+          ALERTS_PANE_LINES="$2"
+          [[ "$ALERTS_PANE_LINES" =~ ^[0-9]+$ && "$ALERTS_PANE_LINES" -gt 0 ]] || { echo "[ERROR] --pane-lines 必须是正整数：$ALERTS_PANE_LINES" >&2; exit 2; }
+          shift 2
+          ;;
+        --help|-h) usage 0 ;;
+        *) usage 2 ;;
+      esac
+    done
+    if $ALERTS_JSON; then
+      status_alerts_json "$ALERTS_ONLY" "$ALERTS_PANE_LINES" "$ALERTS_SUMMARY" "$ALERTS_SORT"
+    elif $ALERTS_SUMMARY; then
+      status_alerts_summary "$ALERTS_ONLY"
+    else
+      status_alerts "$ALERTS_ONLY" "$ALERTS_PANE_LINES" "$ALERTS_SORT"
+    fi
+    exit 0
+    ;;
+  --peek)
+    shift
+    [[ $# -ge 1 && $# -le 2 ]] || usage 2
+    peek_goal "$1" "${2:-40}"
+    exit 0
+    ;;
+  --show)
+    [[ $# -eq 2 ]] || usage 2
+    show_goal "$2"
+    exit 0
+    ;;
+esac
+
+SLUG="$1"
+shift
+
+CREATE=false
+RESUME=false
+ATTACH=false
+DRY_RUN=false
+GOAL_PARTS=()
+STOP_OPTIONS=false
+
+while [[ $# -gt 0 ]]; do
+  if ! $STOP_OPTIONS; then
+    case "$1" in
+      --create) CREATE=true; shift; continue ;;
+      --new) RESUME=false; shift; continue ;;
+      --resume) RESUME=true; shift; continue ;;
+      --attach) ATTACH=true; shift; continue ;;
+      --dry-run) DRY_RUN=true; shift; continue ;;
+      --) STOP_OPTIONS=true; shift; continue ;;
+      --help|-h) usage 0 ;;
+    esac
+  fi
+  GOAL_PARTS+=("$1")
+  shift
+done
+
+if [[ ${#GOAL_PARTS[@]} -eq 0 ]]; then
+  echo "[ERROR] 缺少目标文本" >&2
+  usage 2
+fi
+
+GOAL_TEXT="${GOAL_PARTS[*]}"
+dispatch_goal "$SLUG" "$GOAL_TEXT" "$CREATE" "$RESUME" "$DRY_RUN"
+
+if $DRY_RUN; then
+  exit 0
+fi
+
+echo ""
+echo "监控："
+echo "  arisc ls"
+echo "  arisc goal --list"
+echo "  arisc enter base"
+echo "  arisc enter $SLUG"
+
+if $ATTACH; then
+  exec tmux attach -t "=$TMUX_PREFIX-$SLUG"
+fi

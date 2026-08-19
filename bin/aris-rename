@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# aris-rename：重命名 ARIS-Codex 项目。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+TMUX_PREFIX="aris-codex"
+if [[ -z "${ARIS_REPO:-}" && -f "$WORKSPACE_ROOT/config" ]]; then
+  # shellcheck disable=SC1090
+  source "$WORKSPACE_ROOT/config"
+fi
+ARIS_REPO="${ARIS_REPO:-$HOME/work/aris-codex-skills}"
+
+usage() {
+  cat >&2 <<'EOF'
+用法：arisc rename <old-slug> <new-slug> [--force]
+
+行为：
+  1. 如果 tmux 会话 aris-codex-<old> 正在运行，则结束它。
+  2. 将 projects/<old>/ 重命名为 projects/<new>/。
+  3. 更新 pyproject.toml 中的项目名。
+  4. 更新 .aris/installed-skills-codex.txt 中的 project_root。
+  5. 更新 .codex/aris.env 中的环境名和路径。
+
+Codex 全局会话历史由 ~/.codex/sessions 管理，本命令不移动历史。
+EOF
+  exit 2
+}
+
+OLD=""
+NEW=""
+FORCE=false
+for arg in "$@"; do
+  case "$arg" in
+    --force) FORCE=true ;;
+    --help|-h) usage ;;
+    -*) echo "[ERROR] 未知参数：$arg" >&2; usage ;;
+    *)
+      if [[ -z "$OLD" ]]; then
+        OLD="$arg"
+      elif [[ -z "$NEW" ]]; then
+        NEW="$arg"
+      else
+        echo "[ERROR] 位置参数过多" >&2
+        usage
+      fi
+      ;;
+  esac
+done
+[[ -n "$OLD" && -n "$NEW" ]] || usage
+
+SLUG_RE='^[a-z0-9]+(-[a-z0-9]+)*$'
+[[ "$NEW" =~ $SLUG_RE ]] || { echo "[ERROR] new slug 必须是 kebab-case：$NEW" >&2; exit 1; }
+[[ "$NEW" != "base" ]] || { echo "[ERROR] base 是内置元环境名，不能作为项目名" >&2; exit 1; }
+[[ "$OLD" != "base" ]] || { echo "[ERROR] 不能重命名 base 元环境" >&2; exit 1; }
+[[ "$OLD" != "$NEW" ]] || { echo "[ERROR] 新旧名称相同" >&2; exit 1; }
+
+OLD_PROJ="$WORKSPACE_ROOT/projects/$OLD"
+NEW_PROJ="$WORKSPACE_ROOT/projects/$NEW"
+[[ -d "$OLD_PROJ" ]] || { echo "[ERROR] 项目不存在：$OLD_PROJ" >&2; exit 1; }
+[[ ! -e "$NEW_PROJ" ]] || { echo "[ERROR] 目标已存在：$NEW_PROJ" >&2; exit 1; }
+
+OLD_TMUX="$TMUX_PREFIX-$OLD"
+
+canonical_dir() {
+  (cd "$1" 2>/dev/null && pwd -P) || return 1
+}
+
+session_matches_project() {
+  local session="$1" project_dir="$2" session_cwd expected actual
+  command -v tmux >/dev/null || return 1
+  tmux has-session -t "=$session" 2>/dev/null || return 1
+  session_cwd="$(tmux display-message -p -t "=$session:0.0" '#{pane_current_path}' 2>/dev/null || true)"
+  [[ -n "$session_cwd" ]] || return 1
+  expected="$(canonical_dir "$project_dir")" || return 1
+  actual="$(canonical_dir "$session_cwd")" || return 1
+  [[ "$actual" == "$expected" ]]
+}
+
+TMUX_RUNNING=false
+if command -v tmux >/dev/null && tmux has-session -t "=$OLD_TMUX" 2>/dev/null; then
+  session_matches_project "$OLD_TMUX" "$OLD_PROJ" && TMUX_RUNNING=true
+fi
+
+echo "[INFO] 将重命名：$OLD -> $NEW"
+echo "  project : $OLD_PROJ"
+echo "          -> $NEW_PROJ"
+if $TMUX_RUNNING; then
+  echo "  tmux    : 结束 $OLD_TMUX"
+elif command -v tmux >/dev/null && tmux has-session -t "=$OLD_TMUX" 2>/dev/null; then
+  echo "  tmux    : 同名会话不属于当前项目，跳过结束 $OLD_TMUX"
+else
+  echo "  tmux    : 未运行"
+fi
+if [[ -f "$OLD_PROJ/pyproject.toml" ]] && grep -qE "^name = \"$OLD\"[[:space:]]*$" "$OLD_PROJ/pyproject.toml"; then
+  echo "  pyproject : 更新 name"
+fi
+if [[ -f "$OLD_PROJ/.aris/installed-skills-codex.txt" ]]; then
+  echo "  manifest  : 更新 project_root"
+fi
+
+if ! $FORCE; then
+  printf "继续？[y/N] "
+  read -r REPLY
+  [[ "$REPLY" =~ ^[Yy]$ ]] || { echo "[INFO] 已取消"; exit 0; }
+fi
+
+if $TMUX_RUNNING; then
+  tmux kill-session -t "=$OLD_TMUX"
+  echo "[OK] 已结束 tmux：$OLD_TMUX"
+fi
+
+mv "$OLD_PROJ" "$NEW_PROJ"
+echo "[OK] 已移动项目目录"
+
+PYPROJ="$NEW_PROJ/pyproject.toml"
+if [[ -f "$PYPROJ" ]] && grep -qE "^name = \"$OLD\"[[:space:]]*$" "$PYPROJ"; then
+  tmp=$(mktemp "$PYPROJ.tmp.XXXXXX")
+  sed -E "s|^name = \"$OLD\"[[:space:]]*$|name = \"$NEW\"|" "$PYPROJ" > "$tmp"
+  mv "$tmp" "$PYPROJ"
+  echo "[OK] 已更新 pyproject.toml"
+fi
+
+MANIFEST="$NEW_PROJ/.aris/installed-skills-codex.txt"
+if [[ -f "$MANIFEST" ]]; then
+  tmp=$(mktemp "$MANIFEST.tmp.XXXXXX")
+  sed "s|^project_root	$WORKSPACE_ROOT/projects/$OLD\$|project_root	$WORKSPACE_ROOT/projects/$NEW|" "$MANIFEST" > "$tmp"
+  if ! cmp -s "$MANIFEST" "$tmp"; then
+    mv "$tmp" "$MANIFEST"
+    echo "[OK] 已更新 .aris/installed-skills-codex.txt"
+  else
+    rm -f "$tmp"
+  fi
+fi
+
+mkdir -p "$NEW_PROJ/.codex"
+cat > "$NEW_PROJ/.codex/aris.env" <<EOF
+ARIS_ENV_NAME="$NEW"
+ARIS_WORKSPACE_ROOT="$WORKSPACE_ROOT"
+ARIS_REPO="$ARIS_REPO"
+EOF
+echo "[OK] 已更新 .codex/aris.env"
+
+if [[ -x "$ARIS_REPO/tools/install_aris_codex.sh" ]]; then
+  LOG=$(mktemp)
+  if bash "$ARIS_REPO/tools/install_aris_codex.sh" "$NEW_PROJ" --quiet >"$LOG" 2>&1; then
+    echo "[OK] 已收敛 Codex skills 和 AGENTS.md"
+    rm -f "$LOG"
+  else
+    echo "[ERROR] 重命名后 Codex skills 收敛失败，日志保留在 $LOG" >&2
+    exit 1
+  fi
+else
+  echo "[WARN] 未找到 $ARIS_REPO/tools/install_aris_codex.sh；跳过 Codex skills 收敛" >&2
+fi
+
+cat <<EOF
+
+[OK] 已重命名 $OLD -> $NEW
+
+下一步：
+  arisc enter $NEW
+EOF

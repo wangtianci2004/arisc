@@ -1,0 +1,381 @@
+#!/usr/bin/env bash
+# aris-doctor：检查 ARIS-Codex 工作区、项目和外部工具。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+if [[ -z "${ARIS_REPO:-}" && -f "$WORKSPACE_ROOT/config" ]]; then
+  # shellcheck disable=SC1090
+  source "$WORKSPACE_ROOT/config"
+fi
+ARIS_REPO="${ARIS_REPO:-$HOME/work/aris-codex-skills}"
+
+OVERALL_OK=true
+PROJECTS_DIR="$WORKSPACE_ROOT/projects"
+JSON=false
+
+usage() {
+  local code="${1:-2}"
+  cat >&2 <<'EOF'
+用法：arisc doctor [--json]
+
+作用：
+  检查 ARIS-Codex 工作区、项目骨架、base 环境、ARIS_REPO 和外部工具。
+
+选项：
+  --json  输出机器可读 JSON
+EOF
+  exit "$code"
+}
+
+json_escape() {
+  local s="${1:-}"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\b'/\\b}
+  s=${s//$'\f'/\\f}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+json_array() {
+  local first=true item
+  printf '['
+  for item in "$@"; do
+    if $first; then
+      first=false
+    else
+      printf ','
+    fi
+    printf '"%s"' "$(json_escape "$item")"
+  done
+  printf ']'
+}
+
+resolve_tool() {
+  command -v "$1" 2>/dev/null && return 0
+  "${SHELL:-bash}" -lc "command -v $1" 2>/dev/null
+}
+
+project_issues() {
+  local p="$1" name="$2" dangling total s
+  local -n out_ref="$3"
+
+  if [[ ! -e "$p/.env" ]]; then
+    if [[ -L "$p/.env" ]]; then
+      out_ref+=(".env 符号链接悬空 -> $(readlink "$p/.env")")
+    else
+      out_ref+=(".env 缺失")
+    fi
+  fi
+
+  if [[ ! -e "$p/.mcp.json" ]]; then
+    if [[ -L "$p/.mcp.json" ]]; then
+      out_ref+=(".mcp.json 符号链接悬空 -> $(readlink "$p/.mcp.json")")
+    else
+      out_ref+=(".mcp.json 缺失")
+    fi
+  fi
+
+  [[ -d "$p/.venv" ]] || out_ref+=(".venv/ 缺失，可运行：arisc repair $name")
+  [[ -d "$p/.codex" ]] || out_ref+=(".codex/ 缺失，可运行：arisc repair $name")
+  [[ -f "$p/.aris/installed-skills-codex.txt" ]] || out_ref+=(".aris/installed-skills-codex.txt 缺失，可运行：arisc repair $name")
+  [[ ! -f "$p/.aris/installed-skills.txt" ]] || out_ref+=("发现旧 skills manifest：.aris/installed-skills.txt，可运行：arisc repair $name")
+
+  if [[ ! -d "$p/.agents/skills" ]]; then
+    out_ref+=(".agents/skills/ 缺失，可运行：arisc repair $name")
+  else
+    dangling=0
+    total=0
+    for s in "$p/.agents/skills"/*; do
+      [[ -e "$s" || -L "$s" ]] || continue
+      total=$((total + 1))
+      [[ -e "$s" ]] || dangling=$((dangling + 1))
+    done
+    if [[ $dangling -gt 0 ]]; then
+      out_ref+=(".agents/skills：$dangling/$total 个符号链接悬空")
+    fi
+  fi
+
+  if [[ -d "$p/.claude" ]]; then
+    out_ref+=("发现旧 .claude/ 目录；确认不再需要后可手动迁移或删除")
+  fi
+}
+
+json_check_object() {
+  local name="$1" ok="$2" message="${3:-}"
+  printf '{"name":"%s","ok":%s,"message":"%s"}' \
+    "$(json_escape "$name")" \
+    "$ok" \
+    "$(json_escape "$message")"
+}
+
+render_json() {
+  local ok=true first project_ok name p path tool tool_path repo_ok repo_message
+  local -a projs issues
+
+  printf '{"workspace_root":"%s","aris_repo":"%s",' \
+    "$(json_escape "$WORKSPACE_ROOT")" \
+    "$(json_escape "$ARIS_REPO")"
+
+  printf '"projects":['
+  if [[ -d "$PROJECTS_DIR" ]]; then
+    shopt -s nullglob
+    projs=("$PROJECTS_DIR"/*/)
+    shopt -u nullglob
+  else
+    projs=()
+  fi
+  first=true
+  for p in "${projs[@]}"; do
+    name="$(basename "$p")"
+    issues=()
+    project_issues "$p" "$name" issues
+    project_ok=true
+    [[ ${#issues[@]} -eq 0 ]] || { project_ok=false; ok=false; }
+    if $first; then
+      first=false
+    else
+      printf ','
+    fi
+    printf '{"name":"%s","path":"%s","ok":%s,"issues":' \
+      "$(json_escape "$name")" \
+      "$(json_escape "${p%/}")" \
+      "$project_ok"
+    json_array "${issues[@]}"
+    printf '}'
+  done
+  printf '],'
+
+  printf '"base":['
+  first=true
+  for path in \
+    "projects/.codex:$PROJECTS_DIR/.codex:缺失，可运行：arisc base-init" \
+    "projects/AGENTS.md:$PROJECTS_DIR/AGENTS.md:缺失，可运行：arisc base-init" \
+    "projects/.agents/skills:$PROJECTS_DIR/.agents/skills:缺失，可运行：arisc base-init"
+  do
+    IFS=':' read -r name check_path message <<< "$path"
+    if $first; then first=false; else printf ','; fi
+    if [[ -e "$check_path" ]]; then
+      json_check_object "$name" true ""
+    else
+      ok=false
+      json_check_object "$name" false "$message"
+    fi
+  done
+  printf '],'
+
+  printf '"workspace":['
+  first=true
+  for path in \
+    "shared/env:$WORKSPACE_ROOT/shared/env:缺失" \
+    "shared/mcp.json:$WORKSPACE_ROOT/shared/mcp.json:缺失" \
+    "templates/RESEARCH_BRIEF.md:$WORKSPACE_ROOT/templates/RESEARCH_BRIEF.md:缺失" \
+    "templates/pyproject.toml:$WORKSPACE_ROOT/templates/pyproject.toml:缺失" \
+    "templates/gitignore:$WORKSPACE_ROOT/templates/gitignore:缺失" \
+    "templates/base/AGENTS.md:$WORKSPACE_ROOT/templates/base/AGENTS.md:缺失"
+  do
+    IFS=':' read -r name check_path message <<< "$path"
+    if $first; then first=false; else printf ','; fi
+    if [[ -e "$check_path" ]]; then
+      json_check_object "$name" true ""
+    else
+      ok=false
+      json_check_object "$name" false "$message"
+    fi
+  done
+  printf '],'
+
+  repo_ok=true
+  repo_message=""
+  if [[ ! -d "$ARIS_REPO" ]]; then
+    repo_ok=false
+    repo_message="不存在，请运行：arisc repo"
+  elif [[ ! -x "$ARIS_REPO/tools/install_aris_codex.sh" ]]; then
+    repo_ok=false
+    repo_message="缺少 tools/install_aris_codex.sh"
+  elif [[ ! -d "$ARIS_REPO/skills/skills-codex" ]]; then
+    repo_ok=false
+    repo_message="缺少 skills/skills-codex"
+  fi
+  $repo_ok || ok=false
+  printf '"aris_repo_check":{"ok":%s,"message":"%s","tools_install":"%s","skills_codex":"%s"},' \
+    "$repo_ok" \
+    "$(json_escape "$repo_message")" \
+    "$(json_escape "$ARIS_REPO/tools/install_aris_codex.sh")" \
+    "$(json_escape "$ARIS_REPO/skills/skills-codex")"
+
+  printf '"tools":['
+  first=true
+  for tool in uv tmux codex git jq; do
+    tool_path="$(resolve_tool "$tool" || true)"
+    if $first; then first=false; else printf ','; fi
+    if [[ -n "$tool_path" ]]; then
+      printf '{"name":"%s","ok":true,"path":"%s"}' "$(json_escape "$tool")" "$(json_escape "$tool_path")"
+    else
+      ok=false
+      printf '{"name":"%s","ok":false,"path":""}' "$(json_escape "$tool")"
+    fi
+  done
+  printf '],'
+
+  printf '"ok":%s}\n' "$ok"
+  $ok
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON=true; shift ;;
+    --help|-h) usage 0 ;;
+    *) echo "[ERROR] 未知参数：$1" >&2; usage 2 ;;
+  esac
+done
+
+if $JSON; then
+  render_json
+  exit $?
+fi
+
+echo "── projects ──"
+if [[ ! -d "$PROJECTS_DIR" ]]; then
+  echo "  (暂无项目)"
+else
+  shopt -s nullglob
+  projs=("$PROJECTS_DIR"/*/)
+  shopt -u nullglob
+  if [[ ${#projs[@]} -eq 0 ]]; then
+    echo "  (暂无项目)"
+  fi
+  for p in "${projs[@]}"; do
+    name=$(basename "$p")
+    issues=()
+
+    if [[ ! -e "$p/.env" ]]; then
+      if [[ -L "$p/.env" ]]; then
+        issues+=(".env 符号链接悬空 -> $(readlink "$p/.env")")
+      else
+        issues+=(".env 缺失")
+      fi
+    fi
+
+    if [[ ! -e "$p/.mcp.json" ]]; then
+      if [[ -L "$p/.mcp.json" ]]; then
+        issues+=(".mcp.json 符号链接悬空 -> $(readlink "$p/.mcp.json")")
+      else
+        issues+=(".mcp.json 缺失")
+      fi
+    fi
+
+    [[ -d "$p/.venv" ]] || issues+=(".venv/ 缺失，可运行：arisc repair $name")
+    [[ -d "$p/.codex" ]] || issues+=(".codex/ 缺失，可运行：arisc repair $name")
+    [[ -f "$p/.aris/installed-skills-codex.txt" ]] || issues+=(".aris/installed-skills-codex.txt 缺失，可运行：arisc repair $name")
+    [[ ! -f "$p/.aris/installed-skills.txt" ]] || issues+=("发现旧 skills manifest：.aris/installed-skills.txt，可运行：arisc repair $name")
+
+    if [[ ! -d "$p/.agents/skills" ]]; then
+      issues+=(".agents/skills/ 缺失，可运行：arisc repair $name")
+    else
+      dangling=0
+      total=0
+      for s in "$p/.agents/skills"/*; do
+        [[ -e "$s" || -L "$s" ]] || continue
+        total=$((total + 1))
+        [[ -e "$s" ]] || dangling=$((dangling + 1))
+      done
+      if [[ $dangling -gt 0 ]]; then
+        issues+=(".agents/skills：$dangling/$total 个符号链接悬空")
+      fi
+    fi
+
+    if [[ -d "$p/.claude" ]]; then
+      issues+=("发现旧 .claude/ 目录；确认不再需要后可手动迁移或删除")
+    fi
+
+    if [[ ${#issues[@]} -eq 0 ]]; then
+      printf "  ✓ %s\n" "$name"
+    else
+      OVERALL_OK=false
+      printf "  ✗ %s\n" "$name"
+      for i in "${issues[@]}"; do
+        printf "      - %s\n" "$i"
+      done
+    fi
+  done
+fi
+
+echo ""
+echo "── base ──"
+if [[ -d "$PROJECTS_DIR/.codex" ]]; then
+  echo "  ✓ projects/.codex"
+else
+  echo "  ✗ projects/.codex 缺失，可运行：arisc base-init"
+  OVERALL_OK=false
+fi
+if [[ -f "$PROJECTS_DIR/AGENTS.md" ]]; then
+  echo "  ✓ projects/AGENTS.md"
+else
+  echo "  ✗ projects/AGENTS.md 缺失，可运行：arisc base-init"
+  OVERALL_OK=false
+fi
+if [[ -d "$PROJECTS_DIR/.agents/skills" ]]; then
+  echo "  ✓ projects/.agents/skills"
+else
+  echo "  ✗ projects/.agents/skills 缺失，可运行：arisc base-init"
+  OVERALL_OK=false
+fi
+
+echo ""
+echo "── workspace ──"
+check() {
+  local label="$1" cond_msg="$2" expr="$3"
+  if eval "$expr"; then
+    printf "  ✓ %s\n" "$label"
+  else
+    printf "  ✗ %s — %s\n" "$label" "$cond_msg"
+    OVERALL_OK=false
+  fi
+}
+check "shared/env" "缺失" "[[ -f '$WORKSPACE_ROOT/shared/env' ]]"
+check "shared/mcp.json" "缺失" "[[ -f '$WORKSPACE_ROOT/shared/mcp.json' ]]"
+check "templates/RESEARCH_BRIEF.md" "缺失" "[[ -f '$WORKSPACE_ROOT/templates/RESEARCH_BRIEF.md' ]]"
+check "templates/pyproject.toml" "缺失" "[[ -f '$WORKSPACE_ROOT/templates/pyproject.toml' ]]"
+check "templates/gitignore" "缺失" "[[ -f '$WORKSPACE_ROOT/templates/gitignore' ]]"
+check "templates/base/AGENTS.md" "缺失" "[[ -f '$WORKSPACE_ROOT/templates/base/AGENTS.md' ]]"
+
+echo ""
+echo "── ARIS_REPO ──"
+echo "  已解析：$ARIS_REPO"
+if [[ ! -d "$ARIS_REPO" ]]; then
+  echo "  ✗ 不存在，请运行：arisc repo"
+  OVERALL_OK=false
+elif [[ ! -x "$ARIS_REPO/tools/install_aris_codex.sh" ]]; then
+  echo "  ✗ 缺少 tools/install_aris_codex.sh"
+  OVERALL_OK=false
+elif [[ ! -d "$ARIS_REPO/skills/skills-codex" ]]; then
+  echo "  ✗ 缺少 skills/skills-codex"
+  OVERALL_OK=false
+else
+  echo "  ✓ tools/install_aris_codex.sh"
+  echo "  ✓ skills/skills-codex"
+fi
+
+echo ""
+echo "── PATH 中的工具 ──"
+for tool in uv tmux codex git jq; do
+  path=$(resolve_tool "$tool")
+  if [[ -n "$path" ]]; then
+    printf "  ✓ %-8s %s\n" "$tool" "$path"
+  else
+    printf "  ✗ %-8s 未找到\n" "$tool"
+    OVERALL_OK=false
+  fi
+done
+
+echo ""
+if $OVERALL_OK; then
+  echo "[OK] 所有检查通过"
+  exit 0
+else
+  echo "[WARN] 发现问题，见上方"
+  exit 1
+fi

@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# aris-new <slug>：在 $WORKSPACE_ROOT/projects/<slug> 下创建 Codex 科研环境。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+if [[ -z "${ARIS_REPO:-}" && -f "$WORKSPACE_ROOT/config" ]]; then
+  # shellcheck disable=SC1090
+  source "$WORKSPACE_ROOT/config"
+fi
+ARIS_REPO="${ARIS_REPO:-$HOME/work/aris-codex-skills}"
+
+require_codex_repo() {
+  if [[ ! -d "$ARIS_REPO" ]]; then
+    echo "[ERROR] ARIS_REPO 不存在：$ARIS_REPO" >&2
+    echo "        先运行：arisc repo" >&2
+    echo "        或临时指定：ARIS_REPO=/path/to/Auto-claude-code-research-in-sleep arisc new <slug>" >&2
+    exit 1
+  fi
+  if [[ ! -x "$ARIS_REPO/tools/install_aris_codex.sh" ]]; then
+    echo "[ERROR] 找不到 Codex 技能安装器：$ARIS_REPO/tools/install_aris_codex.sh" >&2
+    echo "        请确认 ARIS_REPO 指向包含 tools/install_aris_codex.sh 的上游仓库。" >&2
+    exit 1
+  fi
+  if [[ ! -d "$ARIS_REPO/skills/skills-codex" ]]; then
+    echo "[ERROR] ARIS_REPO 缺少 skills/skills-codex：$ARIS_REPO" >&2
+    echo "        请运行 arisc repo 重新配置上游仓库。" >&2
+    exit 1
+  fi
+}
+
+usage() {
+  cat >&2 <<'EOF'
+用法：arisc new <slug>
+
+slug 必须是 kebab-case，只能包含 a-z、0-9 和连字符，例如：
+  arisc new llm-tokenizer
+  arisc new nas-routing-mac
+
+环境变量：
+  WORKSPACE_ROOT  默认：~/arisc
+  ARIS_REPO       默认：~/work/aris-codex-skills
+EOF
+  exit 2
+}
+
+[[ $# -ge 1 ]] || usage
+SLUG="$1"
+
+if ! [[ "$SLUG" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
+  echo "[ERROR] slug 必须是 kebab-case：$SLUG" >&2
+  exit 1
+fi
+if [[ "$SLUG" == "base" ]]; then
+  echo "[ERROR] base 是内置元环境，请使用：arisc enter base" >&2
+  exit 1
+fi
+
+PROJ="$WORKSPACE_ROOT/projects/$SLUG"
+if [[ -e "$PROJ" ]]; then
+  echo "[ERROR] 项目已存在：$PROJ" >&2
+  exit 1
+fi
+
+require_codex_repo
+[[ -f "$WORKSPACE_ROOT/shared/env" ]] || { echo "[ERROR] 缺少 $WORKSPACE_ROOT/shared/env" >&2; exit 1; }
+[[ -f "$WORKSPACE_ROOT/shared/mcp.json" ]] || { echo "[ERROR] 缺少 $WORKSPACE_ROOT/shared/mcp.json" >&2; exit 1; }
+command -v uv >/dev/null || { echo "[ERROR] uv 不在 PATH 中" >&2; exit 1; }
+
+echo "[INFO] 创建项目：$PROJ"
+mkdir -p "$PROJ"
+cd "$PROJ"
+
+echo "[INFO] 链接共享配置"
+ln -s "$WORKSPACE_ROOT/shared/env" .env
+ln -s "$WORKSPACE_ROOT/shared/mcp.json" .mcp.json
+
+echo "[INFO] 写入项目模板"
+sed "s/{{SLUG}}/$SLUG/g" "$WORKSPACE_ROOT/templates/pyproject.toml" > pyproject.toml
+cp "$WORKSPACE_ROOT/templates/RESEARCH_BRIEF.md" RESEARCH_BRIEF.md
+cp "$WORKSPACE_ROOT/templates/gitignore" .gitignore
+
+echo "[INFO] 创建 uv 虚拟环境"
+uv venv --quiet
+
+echo "[INFO] 初始化 Codex 项目目录"
+mkdir -p .codex .agents/skills
+cat > .codex/aris.env <<EOF
+ARIS_ENV_NAME="$SLUG"
+ARIS_WORKSPACE_ROOT="$WORKSPACE_ROOT"
+ARIS_REPO="$ARIS_REPO"
+EOF
+
+echo "[INFO] 安装 ARIS Codex 技能"
+INSTALL_LOG=$(mktemp)
+if ! bash "$ARIS_REPO/tools/install_aris_codex.sh" "$PROJ" --quiet >"$INSTALL_LOG" 2>&1; then
+  echo "[ERROR] install_aris_codex.sh 执行失败，日志如下：" >&2
+  cat "$INSTALL_LOG" >&2
+  rm -f "$INSTALL_LOG"
+  exit 1
+fi
+grep -E 'Plan summary|updated AGENTS|Install complete|Reconcile complete' "$INSTALL_LOG" | sed 's/^/[INFO] /' || echo "[INFO] Codex 技能安装完成"
+rm -f "$INSTALL_LOG"
+
+SHARED_SKILLS="$WORKSPACE_ROOT/shared/skills"
+if [[ -d "$SHARED_SKILLS" ]]; then
+  echo "[INFO] 叠加 workspace 共享技能：$SHARED_SKILLS"
+  mkdir -p "$PROJ/.agents/skills"
+  for src in "$SHARED_SKILLS"/*/; do
+    [[ -d "$src" ]] || continue
+    name=$(basename "$src")
+    dst="$PROJ/.agents/skills/$name"
+    if [[ -e "$dst" && ! -L "$dst" ]]; then
+      echo "[WARN] 跳过 ${name}：目标不是符号链接：$dst" >&2
+      continue
+    fi
+    ln -sfn "${src%/}" "$dst"
+    echo "[INFO] + $name"
+  done
+fi
+
+echo "[INFO] 初始化项目 Git 仓库"
+git init -q
+git add .gitignore RESEARCH_BRIEF.md pyproject.toml AGENTS.md
+git -c user.email=aris@local -c user.name=aris commit -q -m "初始化 ARIS-Codex 项目骨架" 2>/dev/null || true
+
+cat <<EOF
+
+[OK] 已创建 $PROJ
+
+下一步：
+  arisc enter $SLUG         # 启动或连接 tmux 中的 Codex 会话
+
+  先编辑 RESEARCH_BRIEF.md 描述研究方向，然后在 Codex 中运行 /research-pipeline
+
+tmux：
+  Ctrl+B D                  从 tmux 分离，Codex 会继续在后台运行
+  arisc enter $SLUG         重新连接会话
+  arisc enter --list        查看运行中的 ARIS-Codex 会话
+  arisc enter --kill $SLUG  结束后台会话
+
+清理：
+  arisc del $SLUG           软删除项目到 .trash/
+  arisc purge --older-than 30 清理旧回收站条目
+
+完整帮助见 \`arisc help\`。
+EOF

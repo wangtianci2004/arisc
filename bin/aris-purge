@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# aris-purge：永久删除回收站中的旧项目快照。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+TRASH_ROOT="$WORKSPACE_ROOT/.trash"
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/arisc-platform.sh
+source "$SCRIPT_DIR/../lib/arisc-platform.sh"
+
+usage() {
+  cat >&2 <<'EOF'
+用法：arisc purge [--older-than N] [--all] [--force]
+
+  --older-than N   删除超过 N 天的回收站条目，默认 30
+  --all            删除所有回收站条目
+  --force          跳过确认
+EOF
+  exit 2
+}
+
+DAYS=30
+ALL=false
+FORCE=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --older-than) [[ $# -ge 2 ]] || usage; DAYS="$2"; shift 2 ;;
+    --all)        ALL=true; shift ;;
+    --force)      FORCE=true; shift ;;
+    --help|-h)    usage ;;
+    *)            echo "[ERROR] 未知参数：$1" >&2; usage ;;
+  esac
+done
+
+[[ "$DAYS" =~ ^[0-9]+$ ]] || { echo "[ERROR] --older-than 必须是非负整数" >&2; exit 2; }
+
+if [[ ! -d "$TRASH_ROOT" ]]; then
+  echo "[INFO] 回收站为空：$TRASH_ROOT 不存在"
+  exit 0
+fi
+
+# 收集待删除条目。
+if $ALL; then
+  shopt -s nullglob
+  victims=("$TRASH_ROOT"/*-*/)
+  shopt -u nullglob
+else
+  # 仅匹配超过指定天数的 <slug>-<ts>/ 目录。
+  victims=()
+  shopt -s nullglob
+  for candidate in "$TRASH_ROOT"/*-*/; do
+    age_days=$(( ( $(date +%s) - $(arisc_stat_mtime "$candidate") ) / 86400 ))
+    (( age_days > DAYS )) && victims+=("$candidate")
+  done
+  shopt -u nullglob
+fi
+
+if [[ ${#victims[@]} -eq 0 ]]; then
+  if $ALL; then
+    echo "[INFO] 回收站为空"
+  else
+    echo "[INFO] 没有超过 $DAYS 天的回收站条目"
+  fi
+  exit 0
+fi
+
+echo "[INFO] 将永久删除 ${#victims[@]} 个条目："
+for v in "${victims[@]}"; do
+  size=$(du -sh "$v" 2>/dev/null | cut -f1)
+  age_days=$(( ( $(date +%s) - $(arisc_stat_mtime "$v") ) / 86400 ))
+  printf "  %-44s %6s  %3d 天\n" "$(basename "${v%/}")" "$size" "$age_days"
+done
+
+if ! $FORCE; then
+  printf "\n继续？[y/N] "
+  read -r reply
+  [[ "$reply" =~ ^[Yy]$ ]] || { echo "[INFO] 已取消"; exit 0; }
+fi
+
+for v in "${victims[@]}"; do
+  rm -rf "${v%/}"
+  echo "  ✓ 已删除 $(basename "${v%/}")"
+done
+echo "[OK] purge 完成"

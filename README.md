@@ -1,0 +1,443 @@
+<div align="center">
+
+# ARISC
+
+### AI Research Workspace Manager for Codex
+
+集成 AIRS 开箱即用的 AI Research 终端工具，一键创建你的专属科研工作区。
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-22c55e.svg)](LICENSE)
+[![Shell: Bash](https://img.shields.io/badge/Shell-Bash-4EAA25?logo=gnubash&logoColor=white)](https://www.gnu.org/software/bash/)
+[![Platform: Linux, macOS & WSL2](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20WSL2-0f172a?logo=apple&logoColor=white)](#系统要求)
+[![Version](https://img.shields.io/badge/version-0.1.0-6366f1.svg)](CHANGELOG.md)
+[![Code style: ShellCheck](https://img.shields.io/badge/style-ShellCheck-7c3aed.svg)](https://www.shellcheck.net/)
+
+[快速开始](#快速开始) · [功能全景](#功能全景) · [命令参考](#命令参考) · [架构](#架构与目录) · [贡献](#参与贡献)
+
+</div>
+
+---
+
+ARISC 是一个面向 Codex 的多项目 AI Research Workspace 管理平台。它把每个研究方向放进独立的 Git 仓库、Python 虚拟环境、Codex 技能集合与 tmux 会话中，同时提供统一的 base 控制面，用来投递目标、查看告警、生成交接报告、恢复项目和审计整个工作区。
+
+它适合需要并行推进多个实验、让 AI 会话在后台持续工作、又希望每个项目保持可复现与可治理的研究者和工程团队。
+
+> [!TIP]
+> 请使用 [Agent 一键安装提示词](AGENT_INSTALL_PROMPT.md) 快速安装 ARISC。安装完成后即可直接使用 `arisc`。
+
+## 为什么选择 ARISC
+
+- **项目级隔离**：每个项目拥有独立目录、`.venv`、Git 历史、研究简报和 Codex 运行骨架。
+- **一次配置，多项目复用**：密钥和 MCP 配置保存在本机 `shared/`，通过符号链接安全复用，不进入项目提交。
+- **后台持续执行**：每个项目对应独立 tmux 会话，可分离、恢复、投递目标和发送后续指令。
+- **工作区控制面**：`base` 环境统一展示状态、阻塞、待处理事项、报告和诊断材料。
+- **可观测、可交接**：状态、告警、议程、triage、快照和 JSON 输出可供人或自动化系统消费。
+- **生命周期完整**：创建、fork、重命名、软删除、恢复、永久清理与批量修复都有明确边界。
+- **本地优先**：项目、报告、密钥和运行状态留在你的设备上；开源仓库只包含管理器与模板。
+- **可审计**：内置 `doctor` 与 `audit` 检查工具链、链接、命令、文档和技能模板是否一致。
+
+## 快速开始
+
+### 系统要求
+
+| 组件 | 要求 | 用途 |
+| --- | --- | --- |
+| 操作系统 | Linux、macOS 或 WSL2 | 正式支持的平台 |
+| Bash | 4.4+ | CLI 运行时；macOS 使用 Homebrew Bash |
+| Git | 2.x | 安装、更新和项目版本控制 |
+| curl | 任意较新版本 | 一键模式缺少 `uv` 时调用官方安装器 |
+| uv | 较新版本 | 创建轻量、快速的 Python 虚拟环境 |
+| jq | 1.6+ | JSON 状态与诊断 |
+| tmux | 3.x | 后台托管 Codex 会话 |
+| Codex CLI | 当前稳定版 | 进入项目并执行 AI Research 工作流 |
+
+`./install.sh --yes` 可以自动安装 `uv`；`git`、`curl`、`jq`、`tmux` 与 Codex CLI 请先通过系统或官方安装方式准备好。
+
+#### Ubuntu / Debian / WSL2
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git curl jq tmux
+```
+
+#### macOS
+
+macOS 需要 Homebrew Bash 4.4+。安装器和 `arisc` 入口会自动从 Apple Silicon 的 `/opt/homebrew/bin/bash` 或 Intel Mac 的 `/usr/local/bin/bash` 重新启动，无需修改系统 `/bin/bash`：
+
+```bash
+brew install bash jq tmux uv
+```
+
+如果尚未安装 Homebrew，请先按照 [Homebrew 官方安装文档](https://docs.brew.sh/Installation)完成安装。Codex CLI 仍需按其官方方式单独安装。
+
+### 新设备一键配置
+
+在新设备执行下面的一键安装命令：
+
+```bash
+git clone https://github.com/wangtianci2004/arisc.git ~/arisc \
+  && ~/arisc/install.sh --yes
+```
+
+安装器会：
+
+1. 初始化 `projects/` 与 `shared/` 本地目录；
+2. 注册 `~/.local/bin/arisc -> ~/arisc/bin/arisc`；
+3. 初始化本机密钥与 MCP 配置模板；
+4. 克隆并验证 ARIS Codex 研究技能仓库；
+5. 在需要时安装 `uv`；
+6. 物化 base 控制面并运行健康检查。
+
+加载新的 PATH，然后创建第一个项目：
+
+```bash
+exec "$SHELL" -l
+arisc doctor
+arisc new my-first-research
+arisc enter my-first-research
+```
+
+在项目中先编辑 `RESEARCH_BRIEF.md`，再通过 Codex 启动研究流程。tmux 中按 `Ctrl+B`、再按 `D` 即可安全分离；后台会话会继续运行。
+
+### 已克隆仓库的安装选项
+
+```bash
+./install.sh --yes                       # 推荐：非交互配置，必要时安装 uv
+./install.sh --no-path                   # 不修改 Bash/Zsh 启动文件
+./install.sh --repo-path /path/to/skills # 使用指定的研究技能仓库
+./install.sh --skip-repo                 # 暂不配置研究技能仓库
+./install.sh --skip-doctor               # 跳过安装后的健康检查
+```
+
+若需要使用研究技能仓库的 fork，可在安装前设置：
+
+```bash
+export ARIS_REPO_URL=https://github.com/your-org/your-aris-skills-fork.git
+./install.sh --yes
+```
+
+## 功能全景
+
+```text
+                              ARISC base 控制面
+                   status · alerts · agenda · reports
+                                    │
+             ┌──────────────────────┼──────────────────────┐
+             │                      │                      │
+      project-alpha           project-beta          project-gamma
+      ├─ .venv                ├─ .venv               ├─ .venv
+      ├─ Git                  ├─ Git                 ├─ Git
+      ├─ Codex skills         ├─ Codex skills        ├─ Codex skills
+      └─ tmux session         └─ tmux session        └─ tmux session
+             │                      │                      │
+             └──────────────────────┴──────────────────────┘
+                       shared/.env · shared/mcp.json
+```
+
+一个典型的长期研究循环如下：
+
+```bash
+arisc new sparse-moe-routing
+arisc goal sparse-moe-routing -- "完成文献综述并提出三个可证伪假设"
+arisc status
+arisc alerts --only blocked
+arisc inspect sparse-moe-routing
+arisc send sparse-moe-routing -- "优先验证第二个假设"
+arisc report --save
+```
+
+## 命令参考
+
+运行 `arisc help` 查看完整入口帮助，运行 `arisc <command> --help` 查看参数。当前公开接口包含以下全部命令。
+
+### 项目生命周期
+
+| 命令 | 说明 |
+| --- | --- |
+| `arisc new <slug>` | 创建独立项目、uv 环境、共享配置链接、Codex 技能与 Git 仓库 |
+| `arisc fork <project> [new]` | 从已有研究工作区复制项目并迁移到 Codex 骨架 |
+| `arisc rename <old> <new>` | 原地重命名项目并更新相关运行元数据 |
+| `arisc del <slug>` | 软删除项目到 `.trash/`，同时结束对应 tmux 会话 |
+| `arisc restore <slug>` | 从回收站恢复项目 |
+| `arisc purge --older-than <days>` | 永久清理超过指定天数的回收站条目 |
+| `arisc repair <slug...>` | 为已有项目补齐链接、环境、Codex 目录和技能清单 |
+| `arisc path <slug>` | 输出项目绝对路径，适合 `cd "$(arisc path demo)"` |
+
+项目 slug 使用 kebab-case，例如 `llm-tokenizer` 或 `nas-routing-mac`。`base` 是保留名称。
+
+### 运行与会话
+
+| 命令 | 说明 |
+| --- | --- |
+| `arisc enter <slug>` | 创建或连接 tmux 托管的 Codex 会话 |
+| `arisc enter base` | 进入工作区级 base Codex 环境 |
+| `arisc goal <slug> -- <text>` | 向项目会话投递 `/goal` 并确保后台运行 |
+| `arisc auto <slug> -- <text>` | 投递 goal 后立即输出 base 监控摘要 |
+| `arisc send <slug> -- <message>` | 向正在运行的项目发送单行指令 |
+| `arisc run <slug> -- <command>` | 在项目目录和 `.venv` 环境中执行命令 |
+| `arisc activate <slug>` | 输出可由 `eval` 使用的环境激活脚本 |
+| `arisc tail <slug> [N]` | 显示当前阶段可获得的会话尾部或明确说明不可用原因 |
+| `arisc happy <slug>` | 当前明确返回“不支持”的辅助命令 |
+
+自动化场景还可以使用：
+
+```bash
+arisc auto --snapshot demo -- "继续实验并保存接管材料"
+arisc auto --summary-json demo -- "推进任务并输出摘要 JSON"
+arisc auto --summary-json-only demo -- "只输出机器可读摘要"
+arisc goal --status --json
+```
+
+### 监控、诊断与交接
+
+| 命令 | 说明 |
+| --- | --- |
+| `arisc status` | 输出一屏工作区总览；支持 `--json` |
+| `arisc watch` | 持续刷新环境、goal 与 tmux 状态；支持只看一次 |
+| `arisc alerts` | 显示 blocked、attention、waiting 或 stopped 项目 |
+| `arisc agenda` | 为需要人工处理的项目生成只读接管议程 |
+| `arisc triage` | 聚合异常项目，并逐个生成 inspect 诊断；支持保存 |
+| `arisc inspect <slug>` | 诊断单个项目的骨架、goal、tmux、Git 和 pane 状态 |
+| `arisc info [slug]` | 输出工作区或指定项目的环境信息 |
+| `arisc report` | 生成只读交接报告；`--save` 更新稳定入口 |
+| `arisc reports` | 列出或读取已保存的报告、诊断和快照材料 |
+| `arisc ls` | 列出项目阶段与 tmux 状态；支持 `--json` |
+| `arisc doctor` | 检查外部工具、路径、链接、项目骨架与本机配置 |
+| `arisc audit` | 审计 CLI、帮助、README 和 base 技能是否同步 |
+
+报告支持按类型筛选和机器读取：
+
+```bash
+arisc reports --type triage
+arisc reports --type env
+arisc reports --type snapshot
+arisc reports --type status
+arisc reports --type doctor
+arisc reports --type audit
+arisc reports --type all --json
+arisc reports --path current
+```
+
+### base 控制面
+
+| 命令 | 说明 |
+| --- | --- |
+| `arisc base` | 默认输出统一工作区总览 |
+| `arisc base status` | 查看一次 base 状态 |
+| `arisc base watch` | 持续监控工作区 |
+| `arisc base alerts` | 聚合需要人工注意的项目 |
+| `arisc base agenda` | 生成接管议程 |
+| `arisc base summary` | 输出适合快速接管的短摘要 |
+| `arisc base auto` | 从 base 入口执行自动投递流程 |
+| `arisc base triage` | 聚合诊断异常项目 |
+| `arisc base report` | 生成工作区交接报告 |
+| `arisc base reports` | 浏览保存材料 |
+| `arisc base snapshot` | 保存报告、环境导出、status/doctor/audit JSON 与索引 |
+| `arisc base info` | 显示 base 工作区信息 |
+| `arisc base enter` | 进入 base Codex 会话 |
+| `arisc base doctor` | 执行工作区健康检查 |
+| `arisc base audit` | 执行一致性审计 |
+| `arisc base init` | 物化或修复 base 环境 |
+| `arisc base-init` | 直接调用底层 base 初始化器 |
+
+`arisc base summary --json` 会同时给出最新保存材料和诊断 JSON 路径，方便外部控制器找到 `latest.status`、`latest.doctor` 与 `latest.audit`。`arisc base snapshot` 则把一次接管所需材料原子化保存到 `reports/`。
+
+### 环境管理
+
+`arisc env` 提供类似 conda 的统一命名空间：
+
+```bash
+arisc env list [--json]
+arisc env create <slug>
+arisc env fork <source> [new]
+arisc env info [slug]
+arisc env export [slug|--all] [--save]
+arisc env activate <slug>
+arisc env run <slug> -- <command>
+arisc env repair <slug...>
+arisc env remove <slug>
+arisc env rename <old> <new>
+arisc env restore <slug>
+arisc env path <slug>
+```
+
+顶层 `arisc env` 命令只做路由，底层行为与对应生命周期命令保持一致。
+
+### 仓库与更新
+
+| 命令 | 说明 |
+| --- | --- |
+| `arisc repo` | 交互选择、克隆或更新 ARIS Codex 研究技能仓库 |
+| `arisc repo status` | 查看技能仓库来源、远端、分支与 Codex 链路状态 |
+| `arisc repo setup [path]` | 非交互克隆/验证技能仓库并写入本机配置 |
+| `arisc update` | 拉取已配置的技能仓库并收敛所有项目技能链接 |
+
+设备专属的绝对路径写在根目录 `config` 中，该文件被 Git 忽略。发布仓库不会包含维护者机器上的路径。
+
+## 架构与目录
+
+```text
+~/arisc/
+├── bin/                  # arisc 分发器与全部 aris-* 子命令
+├── templates/            # 项目、共享配置和 base 技能模板
+├── tests/                # 隔离烟雾测试
+├── projects/             # 本机项目与 base 控制面（Git ignored）
+│   ├── .codex/
+│   ├── .agents/skills/
+│   └── <slug>/
+├── shared/               # 本机密钥、MCP 配置与共享技能（Git ignored）
+├── reports/              # 保存的交接材料（Git ignored）
+├── .trash/               # 软删除项目（Git ignored）
+├── config                # 设备专属 ARIS_REPO 路径（Git ignored）
+├── install.sh            # 幂等安装器
+├── VERSION
+└── LICENSE
+```
+
+每个 `arisc new <slug>` 创建的项目结构：
+
+```text
+projects/<slug>/
+├── .agents/skills/       # 项目可用的 Codex skills
+├── .aris/                # 技能安装清单与工具链接
+├── .codex/aris.env       # ARISC 项目运行元数据
+├── .env -> shared/env    # 本机共享密钥，不提交
+├── .mcp.json -> shared/mcp.json
+├── .venv/                # uv 虚拟环境
+├── .git/                 # 独立 Git 历史
+├── AGENTS.md             # Codex 项目指令
+├── RESEARCH_BRIEF.md     # 研究问题、约束与交付物
+└── pyproject.toml
+```
+
+### 设计边界
+
+- ARISC 管理工作区与运行生命周期，不替代 Codex CLI、Git、uv 或 tmux。
+- `projects/` 中的每个项目是独立 Git 仓库；根仓库只发布管理平台本身。
+- `.env` 与 `.mcp.json` 是到本机共享配置的链接，不应提交到项目仓库。
+- 删除默认是可恢复的软删除；永久清理必须显式运行 `purge`。
+- JSON 输出是自动化接口；面向人的输出可能随可读性改进而调整。
+
+## 多设备迁移
+
+在新设备执行一键安装，然后只迁移你真正需要的本地状态：
+
+1. 从各自远端重新克隆 `projects/<slug>` 中的项目仓库，或安全复制项目目录；
+2. 手动填写新设备的 `shared/env`，不要通过 Git 同步密钥；
+3. 按设备调整 `shared/mcp.json`；
+4. 运行 `arisc repair <slug...>` 重建符号链接、虚拟环境和 Codex 技能；
+5. 运行 `arisc doctor` 与 `arisc audit` 验证新设备。
+
+如果只是平台升级：
+
+```bash
+git -C ~/arisc pull --ff-only
+~/arisc/install.sh --yes
+arisc update
+arisc doctor
+```
+
+## 故障排查
+
+### `arisc` 不在 PATH
+
+```bash
+exec "$SHELL" -l
+command -v arisc
+ls -l ~/.local/bin/arisc
+```
+
+安装器默认更新 `~/.bashrc` 或 `~/.zshrc`。若使用 `--no-path`，请自行将 `~/.local/bin` 加入 PATH。
+
+### `arisc new` 提示 ARIS_REPO 不存在
+
+```bash
+arisc repo setup
+arisc repo status
+```
+
+若使用 fork：
+
+```bash
+ARIS_REPO_URL=https://github.com/your-org/aris-skills.git arisc repo setup ~/work/aris-codex-skills
+```
+
+### 项目骨架或链接异常
+
+```bash
+arisc inspect <slug>
+arisc repair <slug>
+arisc doctor
+```
+
+`repair` 不会静默覆盖已有的普通 `.env` 或 `.mcp.json` 文件；遇到冲突时会停止并要求人工确认。
+
+### tmux 会话问题
+
+```bash
+arisc enter --list
+arisc enter <slug>
+arisc enter --kill <slug>
+```
+
+### 发布前自检
+
+```bash
+make check
+WORKSPACE_ROOT="$PWD" arisc audit
+git status --short
+```
+
+烟雾测试使用临时 HOME、临时技能仓库与假的 `uv`，不会创建真实研究项目，也不会修改你的用户配置。
+
+## 安全与隐私
+
+> [!WARNING]
+> `shared/env` 可能包含 API 密钥。它和 `shared/mcp.json`、`config`、`projects/`、`reports/` 默认都被根仓库忽略。发布前仍应人工检查 `git diff --cached`。
+
+- 只通过 `arisc repo setup` 配置你信任的技能仓库；技能安装器会在本机执行代码。
+- 不要把 `.env`、私有数据集、会话日志或带凭据的诊断输出粘贴到 Issue。
+- 发现安全问题时请按 [SECURITY.md](SECURITY.md) 使用私密渠道报告。
+- `arisc audit` 是一致性检查，不是恶意代码扫描器或沙箱。
+
+## 参与贡献
+
+欢迎提交 bug 修复、平台兼容改进、测试、文档和研究工作流建议。
+
+```bash
+git clone <your-fork-url>
+cd arisc
+make check
+```
+
+提交 Pull Request 前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。命令行为发生变化时，应同步更新 `bin/arisc`、`help.md`、README 和测试。
+
+## 路线图
+
+- 更完整的发行包与固定版本升级通道；
+- 持续扩展 Linux、macOS 与 WSL2 的跨平台回归覆盖；
+- Shell completion 与更稳定的机器可读 schema；
+- 可选的远程运行节点和跨设备只读控制面；
+- 更丰富的端到端恢复与迁移测试。
+
+路线图不构成发布承诺。欢迎在 GitHub Discussions 或 Feature Request 中说明真实研究场景。
+
+## 致谢
+
+ARISC 的 AIRS 研究工作流与 Codex Skills 集成建立在开源项目 [wanshuiyin/Auto-claude-code-research-in-sleep](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep) 的工作基础上。
+
+特别感谢 ARIS / AIRS 项目的作者与所有贡献者，为自动化科研流程、研究技能体系和持续运行的 AI Research 实践提供了重要基础。ARISC 在此之上专注于多项目工作区隔离、环境管理、后台会话、可观测性与跨设备配置。
+
+## 许可证
+
+ARISC 以 [MIT License](LICENSE) 开源。你可以自由使用、复制、修改、合并、发布和分发本项目，但需保留版权与许可声明。
+
+第三方工具和 ARIS Codex 研究技能仓库保留其各自许可证；使用者应独立确认相关条款。
+
+---
+
+<div align="center">
+
+**让每一个 AI Research 项目都可隔离、可追踪、可恢复。**
+
+</div>

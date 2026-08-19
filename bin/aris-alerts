@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# aris-alerts：只读显示需要人工关注的 ARIS goal 状态。
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+exec "$SCRIPT_DIR/aris-goal" --alerts "$@"

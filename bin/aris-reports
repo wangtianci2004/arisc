@@ -1,0 +1,273 @@
+#!/usr/bin/env bash
+# aris-reports：只读列出或查看已保存的交接报告、接管诊断、环境导出、base 快照和诊断 JSON。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+REPORTS_DIR="$WORKSPACE_ROOT/reports"
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/arisc-platform.sh
+source "$SCRIPT_DIR/../lib/arisc-platform.sh"
+SHOW_MODE="list"
+TARGET=""
+REPORT_TYPE="report"
+JSON=false
+
+usage() {
+  local code="${1:-2}"
+  cat >&2 <<'EOF'
+用法：
+  arisc reports [--type report|triage|env|snapshot|status|doctor|audit|all]
+  arisc reports [--type report|triage|env|snapshot|status|doctor|audit|all] --json
+  arisc reports [--type report|triage|env|snapshot|status|doctor|audit|all] --show latest
+  arisc reports [--type report|triage|env|snapshot|status|doctor|audit|all] --show N
+  arisc reports [--type report|triage|env|snapshot|status|doctor|audit|all] --path latest
+  arisc reports [--type report|all] --path current
+
+作用：
+  只读列出或查看 arisc report --save 写入的交接报告、arisc triage --save 写入的接管诊断，
+  arisc env export --save 写入的环境导出，以及 arisc base snapshot 写入的快照索引和诊断 JSON。
+
+选项：
+  --type report 默认，只处理 arisc report --save 生成的 aris-report-*.md
+  --type triage 只处理 arisc triage --save 生成的 aris-triage-*.md 或 .json
+  --type env    只处理 arisc env export --save 生成的 aris-env-export-* 文件
+  --type snapshot 只处理 arisc base snapshot 生成的 aris-snapshot-*.md
+  --type status 只处理 arisc base snapshot 生成的 aris-status-*.json
+  --type doctor 只处理 arisc base snapshot 生成的 aris-doctor-*.json
+  --type audit  只处理 arisc base snapshot 生成的 aris-audit-*.json
+  --type all    同时处理交接报告、接管诊断、环境导出、快照索引和诊断 JSON
+  --json         输出列表模式的机器可读 JSON；不能和 --show 或 --path 同用
+  --show latest  显示最新条目全文
+  --show N       显示列表中第 N 个条目全文，N 从 1 开始
+  --path latest  只输出最新条目路径
+  --path N       只输出列表中第 N 个条目路径
+  --path current 只输出 reports/latest.md 稳定路径；该指针只属于交接报告
+EOF
+  exit "$code"
+}
+
+json_escape() {
+  local s="${1:-}"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\b'/\\b}
+  s=${s//$'\f'/\\f}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --type)
+      [[ $# -ge 2 ]] || usage 2
+      case "$2" in
+        report|triage|env|snapshot|status|doctor|audit|all) REPORT_TYPE="$2" ;;
+        *) echo "[ERROR] --type 只能是 report、triage、env、snapshot、status、doctor、audit 或 all：$2" >&2; exit 2 ;;
+      esac
+      shift 2
+      ;;
+    --show)
+      [[ $# -ge 2 ]] || usage 2
+      SHOW_MODE="show"
+      TARGET="$2"
+      shift 2
+      ;;
+    --path)
+      [[ $# -ge 2 ]] || usage 2
+      SHOW_MODE="path"
+      TARGET="$2"
+      shift 2
+      ;;
+    --json)
+      JSON=true
+      shift
+      ;;
+    --help|-h) usage 0 ;;
+    *) echo "[ERROR] 未知参数：$1" >&2; usage 2 ;;
+  esac
+done
+
+if $JSON && [[ "$SHOW_MODE" != "list" ]]; then
+  echo "[ERROR] --json 只支持列表模式，不能和 --show 或 --path 同用" >&2
+  exit 2
+fi
+
+case "$REPORT_TYPE" in
+  report)
+    mapfile -t REPORTS < <(arisc_files_by_mtime "$REPORTS_DIR" 'aris-report-*.md')
+    ;;
+  triage)
+    mapfile -t REPORTS < <(arisc_files_by_mtime "$REPORTS_DIR" 'aris-triage-*.md' 'aris-triage-*.json')
+    ;;
+  env)
+    mapfile -t REPORTS < <(arisc_files_by_mtime "$REPORTS_DIR" 'aris-env-export-*.md' 'aris-env-export-*.json')
+    ;;
+  snapshot)
+    mapfile -t REPORTS < <(arisc_files_by_mtime "$REPORTS_DIR" 'aris-snapshot-*.md')
+    ;;
+  status)
+    mapfile -t REPORTS < <(arisc_files_by_mtime "$REPORTS_DIR" 'aris-status-*.json')
+    ;;
+  doctor)
+    mapfile -t REPORTS < <(arisc_files_by_mtime "$REPORTS_DIR" 'aris-doctor-*.json')
+    ;;
+  audit)
+    mapfile -t REPORTS < <(arisc_files_by_mtime "$REPORTS_DIR" 'aris-audit-*.json')
+    ;;
+  all)
+    mapfile -t REPORTS < <(arisc_files_by_mtime "$REPORTS_DIR" \
+      'aris-report-*.md' 'aris-triage-*.md' 'aris-triage-*.json' \
+      'aris-env-export-*.md' 'aris-env-export-*.json' 'aris-snapshot-*.md' \
+      'aris-status-*.json' 'aris-doctor-*.json' 'aris-audit-*.json')
+    ;;
+esac
+
+entry_type() {
+  local file="$1" base
+  base="$(basename "$file")"
+  case "$base" in
+    aris-report-*) echo "report" ;;
+    aris-triage-*) echo "triage" ;;
+    aris-env-export-*) echo "env" ;;
+    aris-snapshot-*) echo "snapshot" ;;
+    aris-status-*) echo "status" ;;
+    aris-doctor-*) echo "doctor" ;;
+    aris-audit-*) echo "audit" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+render_json_list() {
+  local first=true file mtime_epoch mtime size_bytes base type i
+  printf '{"workspace_root":"%s","reports_dir":"%s","generated_at":"%s","report_type":"%s","count":%s,"items":[' \
+    "$(json_escape "$WORKSPACE_ROOT")" \
+    "$(json_escape "$REPORTS_DIR")" \
+    "$(json_escape "$(date '+%Y-%m-%dT%H:%M:%S%z')")" \
+    "$(json_escape "$REPORT_TYPE")" \
+    "${#REPORTS[@]}"
+  for i in "${!REPORTS[@]}"; do
+    file="${REPORTS[$i]}"
+    base="$(basename "$file")"
+    type="$(entry_type "$file")"
+    mtime_epoch="$(arisc_stat_mtime "$file")"
+    mtime="$(arisc_date_from_epoch "$mtime_epoch" '%Y-%m-%d %H:%M:%S')"
+    size_bytes="$(arisc_stat_size "$file")"
+    if $first; then
+      first=false
+    else
+      printf ','
+    fi
+    printf '{"index":%s,"type":"%s","path":"%s","basename":"%s","mtime_epoch":%s,"mtime":"%s","size_bytes":%s}' \
+      "$((i + 1))" \
+      "$(json_escape "$type")" \
+      "$(json_escape "$file")" \
+      "$(json_escape "$base")" \
+      "$mtime_epoch" \
+      "$(json_escape "$mtime")" \
+      "$size_bytes"
+  done
+  printf ']}\n'
+}
+
+if [[ ${#REPORTS[@]} -eq 0 ]]; then
+  if $JSON; then
+    render_json_list
+    exit 0
+  fi
+  case "$REPORT_TYPE" in
+    report)
+      echo "[INFO] 暂无保存的交接报告：$REPORTS_DIR"
+      echo "       生成报告：arisc report --save"
+      ;;
+    triage)
+      echo "[INFO] 暂无保存的接管诊断：$REPORTS_DIR"
+      echo "       生成诊断：arisc triage --save"
+      ;;
+    env)
+      echo "[INFO] 暂无保存的环境导出：$REPORTS_DIR"
+      echo "       生成导出：arisc env export --save <slug|base>"
+      ;;
+    snapshot)
+      echo "[INFO] 暂无保存的 base 快照：$REPORTS_DIR"
+      echo "       生成快照：arisc base snapshot"
+      ;;
+    status)
+      echo "[INFO] 暂无保存的 status JSON：$REPORTS_DIR"
+      echo "       生成快照：arisc base snapshot"
+      ;;
+    doctor)
+      echo "[INFO] 暂无保存的 doctor JSON：$REPORTS_DIR"
+      echo "       生成快照：arisc base snapshot"
+      ;;
+    audit)
+      echo "[INFO] 暂无保存的 audit JSON：$REPORTS_DIR"
+      echo "       生成快照：arisc base snapshot"
+      ;;
+    all)
+      echo "[INFO] 暂无保存的交接报告、接管诊断、环境导出、base 快照或诊断 JSON：$REPORTS_DIR"
+      echo "       生成报告：arisc report --save"
+      echo "       生成诊断：arisc triage --save"
+      echo "       生成导出：arisc env export --save <slug|base>"
+      echo "       生成快照：arisc base snapshot"
+      ;;
+  esac
+  exit 0
+fi
+
+resolve_report() {
+  local target="$1" idx
+  if [[ "$target" == "current" ]]; then
+    if [[ "$REPORT_TYPE" != "report" && "$REPORT_TYPE" != "all" ]]; then
+      echo "[ERROR] --path current 只适用于交接报告；其他类型请使用 --path latest" >&2
+      exit 2
+    fi
+    if [[ -e "$REPORTS_DIR/latest.md" ]]; then
+      printf '%s\n' "$REPORTS_DIR/latest.md"
+      return 0
+    fi
+    local latest_report
+    latest_report="$(arisc_files_by_mtime "$REPORTS_DIR" 'aris-report-*.md' | head -1)"
+    if [[ -n "$latest_report" ]]; then
+      printf '%s\n' "$latest_report"
+      return 0
+    fi
+    echo "[ERROR] 当前没有保存的交接报告，无法解析 reports/latest.md" >&2
+    exit 2
+  fi
+  if [[ "$target" == "latest" ]]; then
+    printf '%s\n' "${REPORTS[0]}"
+    return 0
+  fi
+  if [[ "$target" =~ ^[0-9]+$ && "$target" -ge 1 && "$target" -le "${#REPORTS[@]}" ]]; then
+    idx=$((target - 1))
+    printf '%s\n' "${REPORTS[$idx]}"
+    return 0
+  fi
+  echo "[ERROR] 条目编号无效：$target" >&2
+  echo "        可用范围：1..${#REPORTS[@]} 或 latest" >&2
+  exit 2
+}
+
+case "$SHOW_MODE" in
+  list)
+    if $JSON; then
+      render_json_list
+      exit 0
+    fi
+    printf "%-5s %-8s %-19s %s\n" "编号" "类型" "修改时间" "路径"
+    printf "%-5s %-8s %-19s %s\n" "---" "----" "--------" "----"
+    for i in "${!REPORTS[@]}"; do
+      file="${REPORTS[$i]}"
+      mtime="$(arisc_date_from_epoch "$(arisc_stat_mtime "$file")" '%Y-%m-%d %H:%M:%S')"
+      printf "%-5s %-8s %-19s %s\n" "$((i + 1))" "$(entry_type "$file")" "$mtime" "$file"
+    done
+    ;;
+  path)
+    resolve_report "$TARGET"
+    ;;
+  show)
+    cat "$(resolve_report "$TARGET")"
+    ;;
+esac

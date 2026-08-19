@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# aris-path：输出项目绝对路径，便于 shell 集成。
+#
+#   cd $(arisc path foo)
+#   code $(arisc path foo)
+#   rsync -avz $(arisc path foo)/ server:~/foo/
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+
+if [[ $# -lt 1 ]]; then
+  echo "[ERROR] 用法：arisc path <slug>" >&2
+  exit 2
+fi
+
+PROJ="$WORKSPACE_ROOT/projects/$1"
+if [[ ! -d "$PROJ" ]]; then
+  echo "[ERROR] 项目不存在：$PROJ" >&2
+  exit 1
+fi
+
+echo "$PROJ"

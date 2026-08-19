@@ -1,0 +1,344 @@
+#!/usr/bin/env bash
+# aris-audit：只读审计 ARIS-Codex CLI、文档和 base 技能是否同步。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/arisc-platform.sh
+source "$SCRIPT_DIR/../lib/arisc-platform.sh"
+GENERATED_AT="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+JSON=false
+
+COMMANDS=(
+  new fork goal auto base status alerts agenda triage report reports watch info inspect env repair activate run send tail
+  ls enter del restore rename path repo update doctor purge happy base-init audit
+)
+
+BASE_SKILLS=(
+  aris-activate aris-agenda aris-alerts aris-audit aris-auto aris-base aris-doctor aris-env aris-goal aris-info aris-inspect aris-report aris-reports aris-run aris-triage
+  aris-send aris-status aris-tail aris-watch
+)
+
+ENV_SUBCOMMANDS=(
+  list create fork info export activate run repair remove rename restore path
+)
+
+BASE_SUBCOMMANDS=(
+  status watch alerts agenda summary auto triage report reports snapshot info enter doctor audit init
+)
+
+ISSUES=()
+WARNINGS=()
+
+usage() {
+  local code="${1:-2}"
+  cat >&2 <<'EOF'
+用法：arisc audit [--json]
+
+作用：
+	  只读审计 ARIS-Codex 工作区自身是否一致：
+	  - 全局 arisc 是否指向当前 ARISC workspace
+	  - bin/aris-* 子命令是否存在、可执行、语法通过
+	  - arisc 分发器是否包含这些子命令
+	  - README.md、help.md 和 arisc help 是否覆盖子命令
+	  - install.sh 是否注册 arisc
+	  - base 技能模板和 projects/.agents/skills 是否同步
+	  - Codex 模板中是否残留 CLAUDE.md 或 .claude/
+
+说明：
+  本命令不创建项目、不启动 Codex、不发送消息、不读取 tmux pane、不删除文件。
+EOF
+  exit "$code"
+}
+
+json_escape() {
+  local s="${1:-}"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\b'/\\b}
+  s=${s//$'\f'/\\f}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+add_issue() {
+  ISSUES+=("$1"$'\t'"$2"$'\t'"$3")
+}
+
+add_warning() {
+  WARNINGS+=("$1"$'\t'"$2"$'\t'"$3")
+}
+
+has_text() {
+  local file="$1" text="$2"
+  [[ -f "$file" ]] || return 1
+  grep -Fq -- "$text" "$file"
+}
+
+script_for_command() {
+  printf '%s/aris-%s\n' "$SCRIPT_DIR" "$1"
+}
+
+resolve_path() {
+  local path="$1"
+  arisc_realpath "$path" 2>/dev/null
+}
+
+check_global_commands() {
+  local expected_arisc actual_arisc arisc_path
+  expected_arisc="$(resolve_path "$SCRIPT_DIR/arisc")"
+
+  if arisc_path="$(command -v arisc 2>/dev/null)"; then
+    actual_arisc="$(resolve_path "$arisc_path")"
+    if [[ "$actual_arisc" != "$expected_arisc" ]]; then
+      add_issue "global" "arisc" "全局 arisc 未指向当前工作区入口：$actual_arisc"
+    fi
+  else
+    add_issue "global" "arisc" "PATH 中找不到 arisc"
+  fi
+
+}
+
+check_command_scripts() {
+  local cmd script dispatch_block
+  dispatch_block="$(sed -n '/case "\$sub" in/,/exec "\$target"/p' "$SCRIPT_DIR/arisc")"
+  for cmd in "${COMMANDS[@]}"; do
+    script="$(script_for_command "$cmd")"
+    if [[ ! -f "$script" ]]; then
+      add_issue "command" "$cmd" "缺少脚本：$script"
+      continue
+    fi
+    if [[ ! -x "$script" ]]; then
+      add_issue "command" "$cmd" "脚本不可执行：$script"
+    fi
+    if ! bash -n "$script" >/dev/null 2>&1; then
+      add_issue "command" "$cmd" "bash -n 语法检查失败：$script"
+    fi
+    if ! printf '%s\n' "$dispatch_block" | grep -Eq "(^|[|[:space:]])${cmd}([|)])"; then
+      add_issue "dispatch" "$cmd" "arisc 分发器未包含子命令：$cmd"
+    fi
+  done
+}
+
+check_docs() {
+  local cmd arisc_help
+  [[ -f "$WORKSPACE_ROOT/README.md" ]] || add_issue "docs" "README.md" "缺少 README.md"
+  [[ -f "$WORKSPACE_ROOT/help.md" ]] || add_issue "docs" "help.md" "缺少 help.md"
+  [[ -x "$SCRIPT_DIR/arisc" ]] || add_issue "docs" "arisc" "缺少 arisc 入口"
+  has_text "$WORKSPACE_ROOT/README.md" "~/.local/bin/arisc -> ~/arisc/bin/arisc" || add_issue "docs" "global arisc" "README.md 未说明全局 arisc 入口"
+  has_text "$WORKSPACE_ROOT/help.md" "~/.local/bin/arisc" || add_issue "docs" "global arisc" "help.md 未说明全局 arisc 入口"
+  has_text "$WORKSPACE_ROOT/install.sh" 'GLOBAL_ARISC="$USER_BIN/arisc"' || add_issue "install" "global arisc" "install.sh 未注册全局 arisc"
+
+  arisc_help="$("$SCRIPT_DIR/arisc" help)"
+  for cmd in "${COMMANDS[@]}"; do
+    has_text "$WORKSPACE_ROOT/README.md" "arisc $cmd" || add_issue "docs" "$cmd" "README.md 未覆盖 arisc $cmd"
+    has_text "$WORKSPACE_ROOT/help.md" "arisc $cmd" || add_issue "docs" "$cmd" "help.md 未覆盖 arisc $cmd"
+    grep -Fq -- "$cmd" <<<"$arisc_help" || add_issue "docs" "$cmd" "arisc help 未覆盖子命令：$cmd"
+  done
+}
+
+check_namespace_help() {
+  local sub
+  local env_help base_help reports_help auto_help base_summary_json
+
+  env_help="$("$SCRIPT_DIR/aris-env" --help 2>&1 || true)"
+  for sub in "${ENV_SUBCOMMANDS[@]}"; do
+    printf '%s\n' "$env_help" | grep -Fq -- "env $sub" || add_issue "namespace" "env $sub" "arisc env --help 未覆盖 env $sub"
+  done
+  has_text "$WORKSPACE_ROOT/templates/base/skills/aris-env/SKILL.md" "env export" || add_issue "namespace" "env export" "/aris-env 技能未说明 env export"
+
+  base_help="$("$SCRIPT_DIR/aris-base" --help 2>&1 || true)"
+  for sub in "${BASE_SUBCOMMANDS[@]}"; do
+    printf '%s\n' "$base_help" | grep -Fq -- "base $sub" || add_issue "namespace" "base $sub" "arisc base --help 未覆盖 base $sub"
+  done
+  has_text "$WORKSPACE_ROOT/templates/base/skills/aris-base/SKILL.md" "base auto" || add_issue "namespace" "base auto" "/aris-base 技能未说明 base auto"
+  has_text "$WORKSPACE_ROOT/README.md" "arisc base summary" || add_issue "namespace" "base summary" "README.md 未说明 base summary"
+  has_text "$WORKSPACE_ROOT/help.md" "arisc base summary" || add_issue "namespace" "base summary" "help.md 未说明 base summary"
+  has_text "$WORKSPACE_ROOT/templates/base/skills/aris-base/SKILL.md" "base summary" || add_issue "namespace" "base summary" "/aris-base 技能未说明 base summary"
+  has_text "$WORKSPACE_ROOT/templates/base/AGENTS.md" "summary" || add_issue "namespace" "base summary" "base AGENTS 模板未说明 base summary"
+  printf '%s\n' "$base_help" | grep -Fq -- "base summary [--json]" || add_issue "namespace" "base summary --json" "arisc base --help 未覆盖 base summary --json"
+  has_text "$WORKSPACE_ROOT/README.md" "arisc base summary --json" || add_issue "namespace" "base summary --json" "README.md 未说明 base summary --json"
+  has_text "$WORKSPACE_ROOT/help.md" "arisc base summary --json" || add_issue "namespace" "base summary --json" "help.md 未说明 base summary --json"
+  has_text "$WORKSPACE_ROOT/templates/base/skills/aris-base/SKILL.md" "--json" || add_issue "namespace" "base summary --json" "/aris-base 技能未说明 summary --json"
+  printf '%s\n' "$base_help" | grep -Fq -- "诊断 JSON 路径" || add_issue "namespace" "base summary diagnostics" "arisc base --help 未说明 summary 诊断 JSON 路径"
+  has_text "$WORKSPACE_ROOT/README.md" "最新保存材料和诊断 JSON 路径" || add_issue "namespace" "base summary diagnostics" "README.md 未说明 base summary 诊断 JSON 路径"
+  has_text "$WORKSPACE_ROOT/help.md" "latest.status" || add_issue "namespace" "base summary diagnostics" "help.md 未说明 base summary latest.status/latest.doctor/latest.audit"
+  has_text "$WORKSPACE_ROOT/templates/base/skills/aris-base/SKILL.md" "status/doctor/audit JSON 路径" || add_issue "namespace" "base summary diagnostics" "/aris-base 技能未说明 summary 诊断 JSON 路径"
+  has_text "$WORKSPACE_ROOT/templates/base/AGENTS.md" "status/doctor/audit JSON 路径" || add_issue "namespace" "base summary diagnostics" "base AGENTS 模板未说明 summary 诊断 JSON 路径"
+  base_summary_json="$("$SCRIPT_DIR/aris-base" summary --json 2>/dev/null || true)"
+  printf '%s\n' "$base_summary_json" | grep -Fq -- '"status":' || add_issue "namespace" "base summary diagnostics" "arisc base summary --json 未输出 latest.status"
+  printf '%s\n' "$base_summary_json" | grep -Fq -- '"doctor":' || add_issue "namespace" "base summary diagnostics" "arisc base summary --json 未输出 latest.doctor"
+  printf '%s\n' "$base_summary_json" | grep -Fq -- '"audit":' || add_issue "namespace" "base summary diagnostics" "arisc base summary --json 未输出 latest.audit"
+
+  auto_help="$("$SCRIPT_DIR/aris-auto" --help 2>&1 || true)"
+  printf '%s\n' "$auto_help" | grep -Fq -- "--snapshot" || add_issue "namespace" "auto --snapshot" "arisc auto --help 未覆盖 --snapshot"
+  printf '%s\n' "$auto_help" | grep -Fq -- "--summary-json" || add_issue "namespace" "auto --summary-json" "arisc auto --help 未覆盖 --summary-json"
+  printf '%s\n' "$auto_help" | grep -Fq -- "--summary-json-only" || add_issue "namespace" "auto --summary-json-only" "arisc auto --help 未覆盖 --summary-json-only"
+  has_text "$WORKSPACE_ROOT/README.md" "arisc auto --snapshot" || add_issue "namespace" "auto --snapshot" "README.md 未说明 auto --snapshot"
+  has_text "$WORKSPACE_ROOT/help.md" "arisc auto --snapshot" || add_issue "namespace" "auto --snapshot" "help.md 未说明 auto --snapshot"
+  has_text "$WORKSPACE_ROOT/templates/base/skills/aris-auto/SKILL.md" "--snapshot" || add_issue "namespace" "auto --snapshot" "/aris-auto 技能未说明 --snapshot"
+  has_text "$WORKSPACE_ROOT/templates/base/AGENTS.md" "--snapshot" || add_issue "namespace" "auto --snapshot" "base AGENTS 模板未说明 auto --snapshot"
+  has_text "$WORKSPACE_ROOT/README.md" "arisc auto --summary-json" || add_issue "namespace" "auto --summary-json" "README.md 未说明 auto --summary-json"
+  has_text "$WORKSPACE_ROOT/help.md" "arisc auto --summary-json" || add_issue "namespace" "auto --summary-json" "help.md 未说明 auto --summary-json"
+  has_text "$WORKSPACE_ROOT/templates/base/skills/aris-auto/SKILL.md" "--summary-json" || add_issue "namespace" "auto --summary-json" "/aris-auto 技能未说明 --summary-json"
+  has_text "$WORKSPACE_ROOT/templates/base/AGENTS.md" "--summary-json" || add_issue "namespace" "auto --summary-json" "base AGENTS 模板未说明 auto --summary-json"
+  has_text "$WORKSPACE_ROOT/README.md" "arisc auto --summary-json-only" || add_issue "namespace" "auto --summary-json-only" "README.md 未说明 auto --summary-json-only"
+  has_text "$WORKSPACE_ROOT/help.md" "arisc auto --summary-json-only" || add_issue "namespace" "auto --summary-json-only" "help.md 未说明 auto --summary-json-only"
+  has_text "$WORKSPACE_ROOT/templates/base/skills/aris-auto/SKILL.md" "--summary-json-only" || add_issue "namespace" "auto --summary-json-only" "/aris-auto 技能未说明 --summary-json-only"
+  has_text "$WORKSPACE_ROOT/templates/base/AGENTS.md" "--summary-json-only" || add_issue "namespace" "auto --summary-json-only" "base AGENTS 模板未说明 auto --summary-json-only"
+
+  reports_help="$("$SCRIPT_DIR/aris-reports" --help 2>&1 || true)"
+  printf '%s\n' "$reports_help" | grep -Fq -- "--json" || add_issue "namespace" "reports --json" "arisc reports --help 未覆盖 --json"
+  printf '%s\n' "$reports_help" | grep -Fq -- "status|doctor|audit" || add_issue "namespace" "reports diagnostics" "arisc reports --help 未覆盖 status/doctor/audit"
+  has_text "$WORKSPACE_ROOT/README.md" "arisc reports --type all --json" || add_issue "namespace" "reports --json" "README.md 未说明 reports --json"
+  has_text "$WORKSPACE_ROOT/help.md" "arisc reports --type all --json" || add_issue "namespace" "reports --json" "help.md 未说明 reports --json"
+  has_text "$WORKSPACE_ROOT/templates/base/skills/aris-reports/SKILL.md" "--json" || add_issue "namespace" "reports --json" "/aris-reports 技能未说明 --json"
+  has_text "$WORKSPACE_ROOT/README.md" "arisc reports --type status" || add_issue "namespace" "reports diagnostics" "README.md 未说明 reports status/doctor/audit"
+  has_text "$WORKSPACE_ROOT/help.md" "arisc reports --type status" || add_issue "namespace" "reports diagnostics" "help.md 未说明 reports status/doctor/audit"
+  has_text "$WORKSPACE_ROOT/templates/base/skills/aris-reports/SKILL.md" "--type status" || add_issue "namespace" "reports diagnostics" "/aris-reports 技能未说明 status/doctor/audit"
+}
+
+check_base_skills() {
+  local skill template live live_target template_target slash_name
+  for skill in "${BASE_SKILLS[@]}"; do
+    template="$WORKSPACE_ROOT/templates/base/skills/$skill/SKILL.md"
+    if [[ ! -f "$template" ]]; then
+      add_issue "base-skill" "$skill" "缺少 base 技能模板：$template"
+      continue
+    fi
+    has_text "$template" "name: $skill" || add_issue "base-skill" "$skill" "SKILL.md name 不匹配：$template"
+    has_text "$template" "Bash(arisc *)" || add_issue "base-skill" "$skill" "SKILL.md 未声明 Bash(arisc *)：$template"
+
+    live="$WORKSPACE_ROOT/projects/.agents/skills/$skill"
+    if [[ -e "$WORKSPACE_ROOT/projects/.agents/skills" || -L "$WORKSPACE_ROOT/projects/.agents/skills" ]]; then
+      if [[ ! -L "$live" ]]; then
+        add_issue "base-skill" "$skill" "base 环境未链接技能：$live"
+      else
+        live_target="$(resolve_path "$live")"
+        template_target="$(resolve_path "$WORKSPACE_ROOT/templates/base/skills/$skill")"
+        if [[ "$live_target" != "$template_target" ]]; then
+          add_issue "base-skill" "$skill" "base 技能链接目标不匹配：$live -> $live_target"
+        fi
+      fi
+    fi
+  done
+
+  if [[ -f "$WORKSPACE_ROOT/templates/base/AGENTS.md" ]]; then
+    for skill in "${BASE_SKILLS[@]}"; do
+      slash_name="/$skill"
+      has_text "$WORKSPACE_ROOT/templates/base/AGENTS.md" "$slash_name" || add_issue "base" "AGENTS.md" "base 模板未说明 $slash_name"
+    done
+  else
+    add_issue "base" "AGENTS.md" "缺少 templates/base/AGENTS.md"
+  fi
+}
+
+check_codex_templates() {
+  local found
+  found="$(find "$WORKSPACE_ROOT/templates" \( -name 'CLAUDE.md' -o -name '.claude' \) -print 2>/dev/null | head -20 || true)"
+  if [[ -n "$found" ]]; then
+    add_issue "codex-template" "legacy" "templates 中仍有非 ARISC 模板：$(printf '%s' "$found" | tr '\n' ' ')"
+  fi
+
+  if [[ -d "$WORKSPACE_ROOT/projects" ]]; then
+    found="$(for legacy_dir in "$WORKSPACE_ROOT/projects"/*/.claude; do
+      [[ -e "$legacy_dir" ]] && printf '%s\n' "$legacy_dir"
+    done | head -20 || true)"
+    if [[ -n "$found" ]]; then
+      add_warning "codex-project" "legacy" "项目中存在旧 .claude/，请确认是否需要手动迁移：$(printf '%s' "$found" | tr '\n' ' ')"
+    fi
+  fi
+}
+
+render_records_json() {
+  local name="$1"
+  local -n records="$2"
+  local first=true scope item message
+  printf '"%s":[' "$name"
+  for record in "${records[@]}"; do
+    IFS=$'\t' read -r scope item message <<< "$record"
+    if $first; then
+      first=false
+    else
+      printf ','
+    fi
+    printf '{"scope":"%s","item":"%s","message":"%s"}' \
+      "$(json_escape "$scope")" \
+      "$(json_escape "$item")" \
+      "$(json_escape "$message")"
+  done
+  printf ']'
+}
+
+render_text() {
+  echo "# ARIS-Codex 审计"
+  echo ""
+  echo "- 生成时间：$GENERATED_AT"
+  echo "- 工作区：$WORKSPACE_ROOT"
+  echo "- 子命令数：${#COMMANDS[@]}"
+  echo "- base 技能数：${#BASE_SKILLS[@]}"
+  echo ""
+
+  if [[ ${#ISSUES[@]} -eq 0 ]]; then
+    echo "[OK] 未发现阻断问题"
+  else
+    echo "[ERROR] 发现 ${#ISSUES[@]} 个阻断问题"
+    local record scope item message
+    for record in "${ISSUES[@]}"; do
+      IFS=$'\t' read -r scope item message <<< "$record"
+      printf '  - [%s] %s：%s\n' "$scope" "$item" "$message"
+    done
+  fi
+
+  echo ""
+  if [[ ${#WARNINGS[@]} -eq 0 ]]; then
+    echo "[OK] 未发现警告"
+  else
+    echo "[WARN] 发现 ${#WARNINGS[@]} 个警告"
+    local record scope item message
+    for record in "${WARNINGS[@]}"; do
+      IFS=$'\t' read -r scope item message <<< "$record"
+      printf '  - [%s] %s：%s\n' "$scope" "$item" "$message"
+    done
+  fi
+}
+
+render_json() {
+  local ok=true
+  [[ ${#ISSUES[@]} -eq 0 ]] || ok=false
+  printf '{"workspace_root":"%s","generated_at":"%s","ok":%s,"command_count":%s,"base_skill_count":%s,' \
+    "$(json_escape "$WORKSPACE_ROOT")" \
+    "$(json_escape "$GENERATED_AT")" \
+    "$ok" \
+    "${#COMMANDS[@]}" \
+    "${#BASE_SKILLS[@]}"
+  render_records_json "issues" ISSUES
+  printf ','
+  render_records_json "warnings" WARNINGS
+  printf '}\n'
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON=true; shift ;;
+    --help|-h) usage 0 ;;
+    *) echo "[ERROR] 未知参数：$1" >&2; usage 2 ;;
+  esac
+done
+
+check_global_commands
+check_command_scripts
+check_docs
+check_namespace_help
+check_base_skills
+check_codex_templates
+
+if $JSON; then
+  render_json
+else
+  render_text
+fi
+
+[[ ${#ISSUES[@]} -eq 0 ]]

@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# aris-run：在指定 ARIS-Codex 项目环境中执行命令。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+SLUG_RE='^[a-z0-9]+(-[a-z0-9]+)*$'
+
+LOAD_ENV=true
+USE_VENV=true
+DRY_RUN=false
+
+usage() {
+  local code="${1:-2}"
+  cat >&2 <<'EOF'
+用法：
+  arisc run [选项] <slug> -- <command...>
+
+作用：
+  在 projects/<slug> 目录中执行命令，默认加载项目 .env，并把 .venv/bin
+  放到 PATH 最前面。适合像 conda run 一样在指定科研环境里运行脚本或检查工具。
+
+选项：
+  --no-env    不加载项目 .env
+  --no-venv   不使用项目 .venv/bin
+  --dry-run   只打印将执行的目录、环境和命令，不实际执行
+
+示例：
+  arisc run lora -- python -V
+  arisc run lora -- python scripts/evaluate.py
+  arisc run lora -- bash -lc 'pwd && python -m pip list | head'
+  arisc run --no-env lora -- env
+EOF
+  exit "$code"
+}
+
+shell_quote_args() {
+  local arg
+  for arg in "$@"; do
+    printf ' %q' "$arg"
+  done
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-env) LOAD_ENV=false; shift ;;
+    --no-venv) USE_VENV=false; shift ;;
+    --dry-run) DRY_RUN=true; shift ;;
+    --help|-h) usage 0 ;;
+    --) echo "[ERROR] 缺少项目名" >&2; usage 2 ;;
+    --*) echo "[ERROR] 未知参数：$1" >&2; usage 2 ;;
+    *) break ;;
+  esac
+done
+
+[[ $# -ge 1 ]] || usage 2
+SLUG="$1"
+shift
+
+if ! [[ "$SLUG" =~ $SLUG_RE ]]; then
+  echo "[ERROR] slug 必须是 kebab-case：$SLUG" >&2
+  exit 1
+fi
+if [[ "$SLUG" == "base" ]]; then
+  echo "[ERROR] arisc run 只用于普通项目；base 是协调环境" >&2
+  exit 1
+fi
+[[ $# -ge 1 && "$1" == "--" ]] || { echo "[ERROR] 命令前必须使用 -- 分隔" >&2; usage 2; }
+shift
+[[ $# -ge 1 ]] || { echo "[ERROR] 缺少要执行的命令" >&2; usage 2; }
+
+PROJECT_DIR="$WORKSPACE_ROOT/projects/$SLUG"
+ENV_FILE="$PROJECT_DIR/.env"
+VENV_DIR="$PROJECT_DIR/.venv"
+
+[[ -d "$PROJECT_DIR" ]] || { echo "[ERROR] 项目不存在：$PROJECT_DIR" >&2; exit 1; }
+
+if $LOAD_ENV; then
+  if [[ ! -e "$ENV_FILE" ]]; then
+    echo "[ERROR] 项目 .env 缺失或符号链接悬空：$ENV_FILE" >&2
+    echo "        可运行：arisc repair $SLUG" >&2
+    exit 1
+  fi
+fi
+
+if $USE_VENV; then
+  if [[ ! -d "$VENV_DIR/bin" ]]; then
+    echo "[ERROR] 项目 .venv/bin 缺失：$VENV_DIR/bin" >&2
+    echo "        可运行：arisc repair $SLUG" >&2
+    exit 1
+  fi
+fi
+
+if $DRY_RUN; then
+  echo "[DRY-RUN] 工作目录：$PROJECT_DIR"
+  echo "[DRY-RUN] 加载 .env：$LOAD_ENV"
+  echo "[DRY-RUN] 使用 .venv：$USE_VENV"
+  printf '[DRY-RUN] 命令：'
+  shell_quote_args "$@"
+  printf '\n'
+  exit 0
+fi
+
+cd "$PROJECT_DIR"
+
+export ARIS_ENV_NAME="$SLUG"
+export ARIS_WORKSPACE_ROOT="$WORKSPACE_ROOT"
+export ARIS_PROJECT_DIR="$PROJECT_DIR"
+
+if $LOAD_ENV; then
+  set +u
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+  set -u
+fi
+
+if $USE_VENV; then
+  export VIRTUAL_ENV="$VENV_DIR"
+  export PATH="$VENV_DIR/bin:$PATH"
+fi
+
+exec "$@"

@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# aris-restore：从 .trash/ 恢复 ARIS-Codex 项目。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+TRASH_ROOT="$WORKSPACE_ROOT/.trash"
+
+usage() {
+  cat >&2 <<'EOF'
+用法：
+  arisc restore <slug>                         恢复最新的匹配快照
+  arisc restore <slug> --ts <YYYYMMDD-HHMMSS> 恢复指定快照
+  arisc restore <slug> --force                 跳过确认
+  arisc restore --list                         列出回收站
+
+行为：
+  - 将 .trash/<slug>-<ts>/ 移回 projects/<slug>
+  - Codex 全局会话历史由 ~/.codex/sessions 管理，本命令不移动历史
+EOF
+  exit 2
+}
+
+[[ $# -ge 1 ]] || usage
+
+if [[ "$1" == "--list" ]]; then
+  if [[ ! -d "$TRASH_ROOT" ]]; then
+    echo "[INFO] 回收站为空：$TRASH_ROOT 不存在"
+    exit 0
+  fi
+  shopt -s nullglob
+  entries=("$TRASH_ROOT"/*-[0-9]*/)
+  shopt -u nullglob
+  if [[ ${#entries[@]} -eq 0 ]]; then
+    echo "[INFO] 回收站为空"
+    exit 0
+  fi
+  printf "%-44s %-18s\n" "回收站条目" "删除时间"
+  printf "%-44s %-18s\n" "----------" "--------"
+  for d in "${entries[@]}"; do
+    name=$(basename "$d")
+    ts=$(echo "$name" | grep -oE '[0-9]{8}-[0-9]{6}$' || echo "?")
+    printf "%-44s %-18s\n" "$name" "$ts"
+  done
+  exit 0
+fi
+
+SLUG="$1"
+shift
+TS=""
+FORCE=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --ts) [[ $# -ge 2 ]] || usage; TS="$2"; shift 2 ;;
+    --force) FORCE=true; shift ;;
+    --help|-h) usage ;;
+    *) echo "[ERROR] 未知参数：$1" >&2; usage ;;
+  esac
+done
+
+[[ -d "$TRASH_ROOT" ]] || { echo "[ERROR] 回收站不存在：$TRASH_ROOT" >&2; exit 1; }
+
+if [[ -n "$TS" ]]; then
+  candidate="$TRASH_ROOT/$SLUG-$TS"
+  [[ -d "$candidate" ]] || { echo "[ERROR] 找不到快照：$candidate" >&2; exit 1; }
+else
+  shopt -s nullglob
+  matches=("$TRASH_ROOT/$SLUG"-[0-9]*/)
+  shopt -u nullglob
+  [[ ${#matches[@]} -gt 0 ]] || { echo "[ERROR] 找不到 slug 为 $SLUG 的回收站快照，可运行：arisc restore --list" >&2; exit 1; }
+  IFS=$'\n' sorted=($(printf '%s\n' "${matches[@]}" | sort))
+  candidate="${sorted[-1]%/}"
+  if [[ ${#matches[@]} -gt 1 ]]; then
+    echo "[INFO] $SLUG 有 ${#matches[@]} 个快照，将恢复最新项；可用 --ts 指定"
+  fi
+fi
+
+PROJ="$WORKSPACE_ROOT/projects/$SLUG"
+[[ ! -e "$PROJ" ]] || { echo "[ERROR] 目标已存在：$PROJ" >&2; exit 1; }
+
+echo "[INFO] 将恢复："
+echo "  from: $candidate"
+echo "  to  : $PROJ"
+
+if ! $FORCE; then
+  printf "继续？[Y/n] "
+  read -r reply
+  [[ "$reply" =~ ^[Nn]$ ]] && { echo "[INFO] 已取消"; exit 0; }
+fi
+
+mkdir -p "$WORKSPACE_ROOT/projects"
+mv "$candidate" "$PROJ"
+mkdir -p "$PROJ/.codex"
+echo "[OK] 已恢复项目：$PROJ"
+echo "下一步：arisc enter $SLUG"

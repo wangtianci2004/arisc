@@ -1,0 +1,262 @@
+#!/usr/bin/env bash
+# aris-triage：只读汇总需要人工关注项目的接管诊断。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+ONLY=""
+SORT_MODE="severity"
+WITH_PANE=false
+PANE_LINES=6
+JSON=false
+SAVE_TRIAGE=false
+OUT_FILE=""
+EMBED=false
+
+usage() {
+  local code="${1:-2}"
+  cat >&2 <<'EOF'
+用法：arisc triage [--only blocked|attention|waiting|stopped] [--sort severity|name] [--with-pane] [--pane-lines N] [--json] [--save] [--out FILE] [--embed]
+
+作用：
+  只读汇总需要人工关注的项目。它先读取 arisc alerts，再对每个告警项目执行 arisc inspect。
+
+选项：
+  --only X        只处理 blocked、attention、waiting 或 stopped 中的一类
+  --sort X        按 severity 或 name 排序，默认 severity
+  --with-pane     附加每个运行中项目的 pane 末尾摘要，默认不输出
+  --pane-lines N  pane 摘要行数，默认 6；仅在 --with-pane 时生效
+  --json          输出机器可读 JSON
+  --save          保存一份带时间戳的接管诊断到 WORKSPACE_ROOT/reports/
+  --out FILE      保存接管诊断到指定文件；同时仍输出到终端
+  --embed         省略顶层标题，供 arisc report --with-triage 嵌入使用
+
+说明：
+  本命令不创建项目、不启动 Codex、不发送消息、不结束会话。
+  --save 不更新 reports/latest.md；该指针保留给 arisc report --save。
+EOF
+  exit "$code"
+}
+
+json_escape() {
+  local s="${1:-}"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\b'/\\b}
+  s=${s//$'\f'/\\f}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --only)
+      [[ $# -ge 2 ]] || usage 2
+      case "$2" in
+        blocked|attention|waiting|stopped) ONLY="$2" ;;
+        *) echo "[ERROR] --only 只能是 blocked、attention、waiting 或 stopped：$2" >&2; exit 2 ;;
+      esac
+      shift 2
+      ;;
+    --sort)
+      [[ $# -ge 2 ]] || usage 2
+      case "$2" in
+        severity|name) SORT_MODE="$2" ;;
+        *) echo "[ERROR] --sort 只能是 severity 或 name：$2" >&2; exit 2 ;;
+      esac
+      shift 2
+      ;;
+    --with-pane) WITH_PANE=true; shift ;;
+    --pane-lines)
+      [[ $# -ge 2 ]] || usage 2
+      PANE_LINES="$2"
+      [[ "$PANE_LINES" =~ ^[0-9]+$ && "$PANE_LINES" -gt 0 ]] || { echo "[ERROR] --pane-lines 必须是正整数：$PANE_LINES" >&2; exit 2; }
+      shift 2
+      ;;
+    --json) JSON=true; shift ;;
+    --embed) EMBED=true; shift ;;
+    --save) SAVE_TRIAGE=true; shift ;;
+    --out)
+      [[ $# -ge 2 ]] || usage 2
+      OUT_FILE="$2"
+      SAVE_TRIAGE=true
+      shift 2
+      ;;
+    --help|-h) usage 0 ;;
+    *) echo "[ERROR] 未知参数：$1" >&2; usage 2 ;;
+  esac
+done
+
+ALERT_ARGS=(--json)
+if [[ -n "$ONLY" ]]; then
+  ALERT_ARGS+=(--only "$ONLY")
+fi
+ALERT_ARGS+=(--sort "$SORT_MODE")
+
+command -v jq >/dev/null || { echo "[ERROR] jq 不在 PATH 中，无法解析 alerts JSON" >&2; exit 1; }
+
+ALERTS_JSON="$("$SCRIPT_DIR/aris-alerts" "${ALERT_ARGS[@]}")"
+
+mapfile -t SLUGS < <(printf '%s\n' "$ALERTS_JSON" | jq -r '.items[].slug')
+
+inspect_json_for_slug() {
+  local slug="$1" out code
+  local inspect_args=("$slug" --json)
+  if $WITH_PANE; then
+    inspect_args+=(--with-pane --pane-lines "$PANE_LINES")
+  fi
+  set +e
+  out="$("$SCRIPT_DIR/aris-inspect" "${inspect_args[@]}")"
+  code=$?
+  set -e
+  if [[ -n "$out" ]]; then
+    printf '%s' "$out"
+  else
+    printf '{"slug":"%s","ok":false,"issues":["arisc inspect 退出码：%s"],"warnings":[]}' \
+      "$(json_escape "$slug")" \
+      "$(json_escape "$code")"
+  fi
+}
+
+inspect_text_for_slug() {
+  local slug="$1" out code
+  local inspect_args=("$slug" --embed)
+  if $WITH_PANE; then
+    inspect_args+=(--with-pane --pane-lines "$PANE_LINES")
+  fi
+  set +e
+  out="$("$SCRIPT_DIR/aris-inspect" "${inspect_args[@]}")"
+  code=$?
+  set -e
+  if [[ -n "$out" ]]; then
+    if $EMBED; then
+      printf '%s\n' "$out" | sed 's/^### /#### /'
+    else
+      printf '%s\n' "$out"
+    fi
+  else
+    echo "[WARN] arisc inspect 退出码：$code"
+  fi
+  if [[ "$code" -ne 0 ]]; then
+    echo "[WARN] arisc inspect 退出码：$code"
+  fi
+}
+
+TRIAGE_CMD=(arisc triage)
+if [[ -n "$ONLY" ]]; then
+  TRIAGE_CMD+=(--only "$ONLY")
+fi
+if [[ "$SORT_MODE" != "severity" ]]; then
+  TRIAGE_CMD+=(--sort "$SORT_MODE")
+fi
+if $WITH_PANE; then
+  TRIAGE_CMD+=(--with-pane --pane-lines "$PANE_LINES")
+fi
+if $JSON; then
+  TRIAGE_CMD+=(--json)
+fi
+if $EMBED; then
+  TRIAGE_CMD+=(--embed)
+fi
+if $SAVE_TRIAGE; then
+  if [[ -n "$OUT_FILE" ]]; then
+    TRIAGE_CMD+=(--out "$OUT_FILE")
+  else
+    TRIAGE_CMD+=(--save)
+  fi
+fi
+TRIAGE_CMD_STR="$(printf ' %q' "${TRIAGE_CMD[@]}")"
+TRIAGE_CMD_STR="${TRIAGE_CMD_STR# }"
+
+render_json() {
+  printf '{"workspace_root":"%s","generated_at":"%s","only":"%s","sort":"%s","items":[' \
+    "$(json_escape "$WORKSPACE_ROOT")" \
+    "$(date '+%Y-%m-%dT%H:%M:%S%z')" \
+    "$(json_escape "${ONLY:-}")" \
+    "$(json_escape "$SORT_MODE")"
+  first=true
+  for slug in "${SLUGS[@]}"; do
+    [[ -n "$slug" ]] || continue
+    inspect_json="$(inspect_json_for_slug "$slug")"
+    if $first; then
+      first=false
+    else
+      printf ','
+    fi
+    printf '%s' "$inspect_json"
+  done
+  printf ']}\n'
+}
+
+render_text() {
+  local heading="##"
+  if $EMBED; then
+    heading="###"
+  else
+    echo "# ARIS-Codex 接管诊断"
+    echo ""
+  fi
+  echo "- 生成时间：$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  echo "- 工作区：$WORKSPACE_ROOT"
+  echo "- 命令：$TRIAGE_CMD_STR"
+  if [[ -n "$ONLY" ]]; then
+    echo "- 筛选：$ONLY"
+  else
+    echo "- 筛选：blocked、attention、waiting、stopped"
+  fi
+  echo "- 排序：$SORT_MODE"
+  echo "- 项目数：${#SLUGS[@]}"
+  echo ""
+
+  if [[ ${#SLUGS[@]} -eq 0 ]]; then
+    echo "[OK] 当前没有需要人工关注的项目"
+    return 0
+  fi
+
+  echo "$heading 告警概览"
+  ALERT_TEXT_ARGS=()
+  if [[ -n "$ONLY" ]]; then
+    ALERT_TEXT_ARGS+=(--only "$ONLY")
+  fi
+  ALERT_TEXT_ARGS+=(--sort "$SORT_MODE")
+  "$SCRIPT_DIR/aris-alerts" "${ALERT_TEXT_ARGS[@]}"
+
+  for slug in "${SLUGS[@]}"; do
+    [[ -n "$slug" ]] || continue
+    echo ""
+    echo "$heading $slug"
+    inspect_text_for_slug "$slug"
+  done
+
+  echo ""
+  echo "$heading 接管顺序"
+  echo "1. 对 blocked 或 waiting 项目先运行：arisc inspect <slug> --with-pane --pane-lines 20"
+  echo "2. 需要人工输入时运行：arisc send <slug> --dry-run -- <message>"
+  echo "3. 确认无跨 workspace 冲突后再运行：arisc enter <slug>"
+}
+
+render_triage() {
+  if $JSON; then
+    render_json
+  else
+    render_text
+  fi
+}
+
+if $SAVE_TRIAGE; then
+  if [[ -z "$OUT_FILE" ]]; then
+    if $JSON; then
+      OUT_FILE="$WORKSPACE_ROOT/reports/aris-triage-$(date +%Y%m%d-%H%M%S).json"
+    else
+      OUT_FILE="$WORKSPACE_ROOT/reports/aris-triage-$(date +%Y%m%d-%H%M%S).md"
+    fi
+  fi
+  mkdir -p "$(dirname "$OUT_FILE")"
+  render_triage | tee "$OUT_FILE"
+  echo "[OK] 接管诊断已保存：$OUT_FILE" >&2
+else
+  render_triage
+fi

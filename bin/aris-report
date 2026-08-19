@@ -1,0 +1,369 @@
+#!/usr/bin/env bash
+# aris-report：生成 ARIS-Codex 工作区只读交接报告。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+TMUX_PREFIX="aris-codex"
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/arisc-platform.sh
+source "$SCRIPT_DIR/../lib/arisc-platform.sh"
+GIT_TIMEOUT="${ARIS_REPORT_GIT_TIMEOUT:-5}"
+
+WITH_PANE=false
+WITH_AGENDA=false
+WITH_TRIAGE=false
+PANE_LINES=8
+RUN_DOCTOR=true
+PANE_LINES_SET=false
+SAVE_REPORT=false
+OUT_FILE=""
+
+usage() {
+  local code="${1:-2}"
+  cat >&2 <<'EOF'
+用法：arisc report [--with-pane] [--with-agenda] [--with-triage] [--pane-lines N] [--no-doctor] [--save] [--out FILE]
+
+生成只读交接报告，汇总项目列表、goal 状态、需要关注的项目、tmux 会话、项目 Git 状态和 doctor 结果。
+
+选项：
+  --with-pane      附加每个运行中 ARIS-Codex tmux pane 的末尾摘要，默认不输出 pane 内容
+  --with-agenda    附加 arisc agenda 接管议程，默认只列出 alerts 概览
+  --with-triage    附加 arisc triage 接管诊断，默认只列出 alerts 概览
+  --pane-lines N   每个 pane 摘要的行数，默认 8；仅在 --with-pane 时生效
+  --no-doctor      跳过 arisc doctor，减少输出
+  --save           保存一份带时间戳的报告到 WORKSPACE_ROOT/reports/，并更新 reports/latest.md
+  --out FILE       保存报告到指定文件；同时仍输出到终端
+
+说明：
+  - 本命令不创建项目、不启动 Codex、不发送消息、不删除文件。
+  - pane 摘要可能包含模型输出或路径信息，默认关闭。
+EOF
+  exit "$code"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --with-pane) WITH_PANE=true; shift ;;
+    --with-agenda) WITH_AGENDA=true; shift ;;
+    --with-triage) WITH_TRIAGE=true; shift ;;
+    --pane-lines)
+      [[ $# -ge 2 ]] || usage 2
+      PANE_LINES="$2"
+      [[ "$PANE_LINES" =~ ^[0-9]+$ && "$PANE_LINES" -gt 0 ]] || { echo "[ERROR] --pane-lines 必须是正整数：$PANE_LINES" >&2; exit 2; }
+      PANE_LINES_SET=true
+      shift 2
+      ;;
+    --no-doctor) RUN_DOCTOR=false; shift ;;
+    --save) SAVE_REPORT=true; shift ;;
+    --out)
+      [[ $# -ge 2 ]] || usage 2
+      OUT_FILE="$2"
+      SAVE_REPORT=true
+      shift 2
+      ;;
+    --help|-h) usage 0 ;;
+    *) echo "[ERROR] 未知参数：$1" >&2; usage 2 ;;
+  esac
+done
+
+run_section() {
+  local title="$1"
+  local code
+  shift
+  echo ""
+  echo "## $title"
+  set +e
+  "$@"
+  code=$?
+  set -e
+  if [[ "$code" -ne 0 ]]; then
+    echo "[WARN] $title 退出码：$code"
+  fi
+  return 0
+}
+
+workspace_sessions() {
+  if ! command -v tmux >/dev/null; then
+    return 0
+  fi
+
+  local projects_dir="$WORKSPACE_ROOT/projects"
+  local session proj slug
+
+  if [[ -d "$projects_dir/.codex" || -f "$projects_dir/AGENTS.md" ]]; then
+    session="$TMUX_PREFIX-base"
+    if tmux has-session -t "=$session" 2>/dev/null && session_matches_project "$session" "$projects_dir"; then
+      printf '%s\n' "$session"
+    fi
+  fi
+
+  [[ -d "$projects_dir" ]] || return 0
+  shopt -s nullglob
+  for proj in "$projects_dir"/*/; do
+    [[ -d "$proj" ]] || continue
+    slug="$(basename "$proj")"
+    session="$TMUX_PREFIX-$slug"
+    if tmux has-session -t "=$session" 2>/dev/null && session_matches_project "$session" "${proj%/}"; then
+      printf '%s\n' "$session"
+    fi
+  done
+  shopt -u nullglob
+}
+
+canonical_dir() {
+  (cd "$1" 2>/dev/null && pwd -P) || return 1
+}
+
+session_matches_project() {
+  local session="$1" project_dir="$2" session_cwd expected actual
+  session_cwd="$(tmux display-message -p -t "=$session:0.0" '#{pane_current_path}' 2>/dev/null || true)"
+  [[ -n "$session_cwd" ]] || return 1
+  expected="$(canonical_dir "$project_dir")" || return 1
+  actual="$(canonical_dir "$session_cwd")" || return 1
+  [[ "$actual" == "$expected" ]]
+}
+
+session_line() {
+  local session="$1" windows
+  windows="$(tmux list-windows -t "=$session" -F '#{window_index}' 2>/dev/null | wc -l | tr -d ' ')"
+  [[ -n "$windows" && "$windows" != "0" ]] || windows="?"
+  printf '%s: %s 个窗口\n' "$session" "$windows"
+}
+
+capture_git() {
+  local out_var="$1" proj="$2" out code
+  shift 2
+  set +e
+  out="$(arisc_run_with_timeout "$GIT_TIMEOUT" git -C "$proj" "$@" 2>/dev/null)"
+  code=$?
+  set -e
+  printf -v "$out_var" '%s' "$out"
+  return "$code"
+}
+
+project_git_summary() {
+  local projects_dir="$WORKSPACE_ROOT/projects"
+  if [[ ! -d "$projects_dir" ]]; then
+    echo "(projects/ 不存在)"
+    return 0
+  fi
+
+  printf "%-28s %-18s %-8s %s\n" "项目" "分支" "dirty" "最近提交"
+  printf "%-28s %-18s %-8s %s\n" "---" "----" "-----" "--------"
+
+  shopt -s nullglob
+  local proj name branch dirty last status_out code
+  for proj in "$projects_dir"/*/; do
+    [[ -d "$proj" ]] || continue
+    name="$(basename "$proj")"
+    if [[ ! -d "$proj/.git" ]]; then
+      printf "%-28s %-18s %-8s %s\n" "$name" "-" "-" "非 Git 项目"
+      continue
+    fi
+    if capture_git branch "$proj" branch --show-current; then
+      true
+    else
+      branch=""
+    fi
+    [[ -n "$branch" ]] || branch="(detached)"
+
+    if capture_git status_out "$proj" status --porcelain --untracked-files=no; then
+      dirty="$(printf '%s\n' "$status_out" | sed '/^$/d' | wc -l | tr -d ' ')"
+    else
+      code=$?
+      if [[ "$code" -eq 124 ]]; then
+        dirty="timeout"
+      else
+        dirty="?"
+      fi
+    fi
+
+    if capture_git last "$proj" log -1 --format='%cr | %s'; then
+      last="$(printf '%s' "$last" | cut -c1-100)"
+    else
+      code=$?
+      if [[ "$code" -eq 124 ]]; then
+        last="timeout"
+      else
+        last="无提交或不可读"
+      fi
+    fi
+    [[ -n "$last" ]] || last="无提交"
+    printf "%-28s %-18s %-8s %s\n" "$name" "$branch" "$dirty" "$last"
+  done
+  shopt -u nullglob
+}
+
+tmux_sessions() {
+  if ! command -v tmux >/dev/null; then
+    echo "tmux 不在 PATH 中"
+    return 0
+  fi
+  local out
+  out="$(
+    while IFS= read -r session; do
+      [[ -n "$session" ]] || continue
+      session_line "$session"
+    done < <(workspace_sessions)
+  )"
+  if [[ -z "$out" ]]; then
+    echo "(当前 workspace 没有运行中的 $TMUX_PREFIX-* 会话)"
+  else
+    echo "$out"
+  fi
+}
+
+pane_summary() {
+  if ! command -v tmux >/dev/null; then
+    echo "tmux 不在 PATH 中"
+    return 0
+  fi
+  local session
+  while IFS= read -r session; do
+    [[ -n "$session" ]] || continue
+    echo ""
+    echo "### $session"
+    tmux capture-pane -t "=$session:0.0" -p -S -2000 2>/dev/null | tail -n "$PANE_LINES" | sed 's/^/  /' || echo "  (无法读取 pane)"
+  done < <(workspace_sessions)
+}
+
+doctor_summary() {
+  if "$SCRIPT_DIR/aris-doctor"; then
+    return 0
+  fi
+  local code=$?
+  echo "[WARN] arisc doctor 退出码：$code"
+  return 0
+}
+
+triage_summary() {
+  local args=(--embed)
+  if $WITH_PANE; then
+    args+=(--with-pane --pane-lines "$PANE_LINES")
+  fi
+  "$SCRIPT_DIR/aris-triage" "${args[@]}"
+}
+
+agenda_summary() {
+  "$SCRIPT_DIR/aris-agenda" --embed
+}
+
+alert_summary() {
+  local summary_json code
+  if ! command -v jq >/dev/null; then
+    "$SCRIPT_DIR/aris-alerts" --summary
+    return 0
+  fi
+
+  set +e
+  summary_json="$("$SCRIPT_DIR/aris-alerts" --summary --json 2>/dev/null)"
+  code=$?
+  set -e
+  if [[ "$code" -ne 0 || -z "$summary_json" ]]; then
+    "$SCRIPT_DIR/aris-alerts" --summary
+    return 0
+  fi
+
+  printf "%-12s %s\n" "类型" "数量"
+  printf "%-12s %s\n" "----" "----"
+  printf '%s\n' "$summary_json" \
+    | jq -r '.summary | [["total", .total], ["blocked", .blocked], ["attention", .attention], ["waiting", .waiting], ["stopped", .stopped]][] | @tsv' \
+    | while IFS=$'\t' read -r kind count; do
+        printf "%-12s %s\n" "$kind" "$count"
+      done
+}
+
+REPORT_CMD=(arisc report)
+if $WITH_PANE; then
+  REPORT_CMD+=(--with-pane)
+  if $PANE_LINES_SET; then
+    REPORT_CMD+=(--pane-lines "$PANE_LINES")
+  fi
+fi
+if $WITH_AGENDA; then
+  REPORT_CMD+=(--with-agenda)
+fi
+if $WITH_TRIAGE; then
+  REPORT_CMD+=(--with-triage)
+fi
+if ! $RUN_DOCTOR; then
+  REPORT_CMD+=(--no-doctor)
+fi
+if $SAVE_REPORT; then
+  if [[ -n "$OUT_FILE" ]]; then
+    REPORT_CMD+=(--out "$OUT_FILE")
+  else
+    REPORT_CMD+=(--save)
+  fi
+fi
+REPORT_CMD_STR="$(printf ' %q' "${REPORT_CMD[@]}")"
+REPORT_CMD_STR="${REPORT_CMD_STR# }"
+
+render_report() {
+cat <<EOF
+# ARIS-Codex 交接报告
+
+- 生成时间：$(date '+%Y-%m-%dT%H:%M:%S%z')
+- 工作区：$WORKSPACE_ROOT
+- 命令：$REPORT_CMD_STR
+EOF
+
+run_section "环境列表" "$SCRIPT_DIR/aris-ls"
+run_section "Goal 状态" "$SCRIPT_DIR/aris-goal" --status
+run_section "告警摘要" alert_summary
+run_section "需要关注" "$SCRIPT_DIR/aris-alerts"
+if $WITH_AGENDA; then
+  run_section "接管议程" agenda_summary
+fi
+if $WITH_TRIAGE; then
+  run_section "接管诊断" triage_summary
+fi
+run_section "运行中的 ARIS-Codex tmux 会话" tmux_sessions
+run_section "项目 Git 状态" project_git_summary
+
+if $WITH_PANE; then
+  run_section "运行中 pane 摘要" pane_summary
+fi
+
+if $RUN_DOCTOR; then
+  run_section "Doctor" doctor_summary
+fi
+
+cat <<'EOF'
+
+## 常用接管命令
+  arisc enter base
+  arisc base
+  arisc base agenda
+  arisc base report --with-agenda
+  arisc info
+  arisc env list
+  arisc alerts
+  arisc agenda
+  arisc triage
+  arisc goal --status
+  arisc goal --peek <slug> 40
+  arisc env info <slug>
+  arisc env export <slug>
+  arisc env run <slug> -- python -V
+  arisc auto <slug> -- <goal>
+  arisc enter <slug>
+  arisc doctor
+EOF
+}
+
+if $SAVE_REPORT; then
+  if [[ -z "$OUT_FILE" ]]; then
+    OUT_FILE="$WORKSPACE_ROOT/reports/aris-report-$(date +%Y%m%d-%H%M%S).md"
+  fi
+  mkdir -p "$(dirname "$OUT_FILE")"
+  render_report | tee "$OUT_FILE"
+  echo "[OK] 报告已保存：$OUT_FILE" >&2
+  if [[ "$OUT_FILE" == "$WORKSPACE_ROOT"/reports/aris-report-*.md ]]; then
+    LATEST_FILE="$WORKSPACE_ROOT/reports/latest.md"
+    ln -sfn "$(basename "$OUT_FILE")" "$LATEST_FILE"
+    echo "[OK] 最新报告指针：$LATEST_FILE" >&2
+  fi
+else
+  render_report
+fi

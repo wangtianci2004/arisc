@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# aris-repair：给已有项目补齐 ARIS-Codex 运行骨架。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+if [[ -z "${ARIS_REPO:-}" && -f "$WORKSPACE_ROOT/config" ]]; then
+  # shellcheck disable=SC1090
+  source "$WORKSPACE_ROOT/config"
+fi
+ARIS_REPO="${ARIS_REPO:-$HOME/work/aris-codex-skills}"
+SLUG_RE='^[a-z0-9]+(-[a-z0-9]+)*$'
+
+require_codex_repo() {
+  if [[ ! -d "$ARIS_REPO" ]]; then
+    echo "[ERROR] ARIS_REPO 不存在：$ARIS_REPO" >&2
+    echo "        先运行：arisc repo" >&2
+    echo "        或临时指定：ARIS_REPO=/path/to/Auto-claude-code-research-in-sleep arisc repair <slug>" >&2
+    exit 1
+  fi
+  if [[ ! -x "$ARIS_REPO/tools/install_aris_codex.sh" ]]; then
+    echo "[ERROR] 找不到 Codex 技能安装器：$ARIS_REPO/tools/install_aris_codex.sh" >&2
+    echo "        请确认 ARIS_REPO 指向包含 tools/install_aris_codex.sh 的上游仓库。" >&2
+    exit 1
+  fi
+  if [[ ! -d "$ARIS_REPO/skills/skills-codex" ]]; then
+    echo "[ERROR] ARIS_REPO 缺少 skills/skills-codex：$ARIS_REPO" >&2
+    echo "        请运行 arisc repo 重新配置上游仓库。" >&2
+    exit 1
+  fi
+}
+
+REPAIR_VENV=true
+REPAIR_ALL=false
+SLUGS=()
+
+usage() {
+  local code="${1:-2}"
+  cat >&2 <<'EOF'
+用法：
+  arisc repair <slug...>
+  arisc repair --all
+
+作用：
+  给已经存在的项目补齐 Codex workspace 运行骨架，适合手工放入 projects/
+  或从旧工作区复制过来的项目。
+
+会补齐：
+  - .env -> shared/env
+  - .mcp.json -> shared/mcp.json
+  - .codex/aris.env
+  - .agents/skills/
+  - .aris/tools -> ARIS_REPO/tools
+  - .aris/installed-skills-codex.txt
+  - .venv/，除非传 --no-venv
+  - .gitignore 中的 Codex 运行态忽略规则
+
+不会覆盖已有普通 .env 或 .mcp.json 文件；遇到这种情况会报错并提示手动处理。
+
+选项：
+  --all       修复所有 projects/ 下的项目
+  --no-venv   不创建缺失的 .venv/
+EOF
+  exit "$code"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --all) REPAIR_ALL=true; shift ;;
+    --no-venv) REPAIR_VENV=false; shift ;;
+    --help|-h) usage 0 ;;
+    --*) echo "[ERROR] 未知参数：$1" >&2; usage 2 ;;
+    *) SLUGS+=("$1"); shift ;;
+  esac
+done
+
+if $REPAIR_ALL && [[ ${#SLUGS[@]} -gt 0 ]]; then
+  echo "[ERROR] --all 不能和显式 slug 同时使用" >&2
+  exit 2
+fi
+
+PROJECTS_DIR="$WORKSPACE_ROOT/projects"
+[[ -d "$PROJECTS_DIR" ]] || { echo "[ERROR] projects/ 不存在：$PROJECTS_DIR" >&2; exit 1; }
+[[ -f "$WORKSPACE_ROOT/shared/env" ]] || { echo "[ERROR] 缺少 $WORKSPACE_ROOT/shared/env" >&2; exit 1; }
+[[ -f "$WORKSPACE_ROOT/shared/mcp.json" ]] || { echo "[ERROR] 缺少 $WORKSPACE_ROOT/shared/mcp.json" >&2; exit 1; }
+require_codex_repo
+if $REPAIR_VENV; then
+  command -v uv >/dev/null || { echo "[ERROR] uv 不在 PATH 中；可传 --no-venv 跳过虚拟环境" >&2; exit 1; }
+fi
+
+if [[ ${#SLUGS[@]} -eq 0 ]]; then
+  if ! $REPAIR_ALL; then
+    usage 2
+  fi
+  shopt -s nullglob
+  for proj in "$PROJECTS_DIR"/*/; do
+    [[ -d "$proj" ]] || continue
+    SLUGS+=("$(basename "$proj")")
+  done
+  shopt -u nullglob
+fi
+
+if [[ ${#SLUGS[@]} -eq 0 ]]; then
+  echo "[INFO] 没有可修复项目"
+  exit 0
+fi
+
+ensure_trailing_newline() {
+  local file="$1"
+  [[ -f "$file" && -s "$file" ]] || return 0
+  if [[ "$(tail -c 1 "$file" | wc -l | tr -d ' ')" == "0" ]]; then
+    printf '\n' >> "$file"
+  fi
+}
+
+ensure_gitignore_rule() {
+  local project_dir="$1" rule="$2" gitignore="$1/.gitignore"
+  if [[ ! -f "$gitignore" ]]; then
+    printf '# ARIS-Codex runtime\n' > "$gitignore"
+  fi
+  if ! grep -qxF "$rule" "$gitignore"; then
+    ensure_trailing_newline "$gitignore"
+    printf '%s\n' "$rule" >> "$gitignore"
+  fi
+}
+
+ensure_symlink() {
+  local dst="$1" src="$2" label="$3"
+  if [[ -L "$dst" ]]; then
+    if [[ "$(readlink "$dst")" == "$src" ]]; then
+      echo "    ✓ $label"
+    else
+      ln -sfn "$src" "$dst"
+      echo "    ~ $label"
+    fi
+    return 0
+  fi
+  if [[ -e "$dst" ]]; then
+    echo "    ✗ $label 已存在且不是符号链接：$dst" >&2
+    return 1
+  fi
+  ln -s "$src" "$dst"
+  echo "    + $label"
+}
+
+repair_one() {
+  local slug="$1" project_dir="$PROJECTS_DIR/$slug" failed=false log
+  if ! [[ "$slug" =~ $SLUG_RE ]]; then
+    echo "[ERROR] slug 必须是 kebab-case：$slug" >&2
+    return 1
+  fi
+  if [[ "$slug" == "base" ]]; then
+    echo "[ERROR] base 是内置元环境，请使用：arisc base-init" >&2
+    return 1
+  fi
+  if [[ ! -d "$project_dir" ]]; then
+    echo "[ERROR] 项目不存在：$project_dir" >&2
+    return 1
+  fi
+
+  echo "[INFO] 修复项目：$slug"
+
+  ensure_symlink "$project_dir/.env" "$WORKSPACE_ROOT/shared/env" ".env" || failed=true
+  ensure_symlink "$project_dir/.mcp.json" "$WORKSPACE_ROOT/shared/mcp.json" ".mcp.json" || failed=true
+  $failed && return 1
+
+  mkdir -p "$project_dir/.codex" "$project_dir/.agents/skills" "$project_dir/.aris"
+  if [[ -e "$project_dir/.aris/tools" && ! -L "$project_dir/.aris/tools" ]]; then
+    echo "    ✗ .aris/tools 已存在且不是符号链接：$project_dir/.aris/tools" >&2
+    return 1
+  fi
+  ln -sfn "$ARIS_REPO/tools" "$project_dir/.aris/tools"
+  echo "    ✓ .aris/tools"
+
+  cat > "$project_dir/.codex/aris.env" <<EOF
+ARIS_ENV_NAME="$slug"
+ARIS_WORKSPACE_ROOT="$WORKSPACE_ROOT"
+ARIS_REPO="$ARIS_REPO"
+EOF
+  echo "    ✓ .codex/aris.env"
+
+  for rule in .env .mcp.json .venv/ .aris/ .agents/ .codex/ research-wiki/ '*.log' __pycache__/ '*.pyc'; do
+    ensure_gitignore_rule "$project_dir" "$rule"
+  done
+  echo "    ✓ .gitignore 运行态规则"
+
+  if $REPAIR_VENV; then
+    if [[ -d "$project_dir/.venv" ]]; then
+      echo "    ✓ .venv"
+    else
+      (cd "$project_dir" && uv venv --quiet)
+      echo "    + .venv"
+    fi
+  fi
+
+  log="$(mktemp)"
+  if bash "$ARIS_REPO/tools/install_aris_codex.sh" "$project_dir" --aris-repo "$ARIS_REPO" --quiet >"$log" 2>&1; then
+    rm -f "$project_dir/.aris/installed-skills.txt"
+    rm -f "$log"
+    echo "    ✓ skills/skills-codex"
+  else
+    echo "    ✗ install_aris_codex.sh 失败，日志保留在 $log" >&2
+    return 1
+  fi
+
+  echo "[OK] $slug 已修复"
+}
+
+FAILED=()
+for slug in "${SLUGS[@]}"; do
+  if ! repair_one "$slug"; then
+    FAILED+=("$slug")
+  fi
+done
+
+if [[ ${#FAILED[@]} -gt 0 ]]; then
+  echo ""
+  echo "[ERROR] 修复失败：${FAILED[*]}" >&2
+  exit 1
+fi
+
+echo ""
+if $REPAIR_ALL; then
+  echo "[OK] 所有项目修复完成"
+else
+  echo "[OK] 指定项目修复完成"
+fi

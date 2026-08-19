@@ -1,0 +1,10 @@
+.env
+.mcp.json
+.venv/
+.aris/
+.agents/
+.codex/
+research-wiki/
+*.log
+__pycache__/
+*.pyc

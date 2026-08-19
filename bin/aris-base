@@ -1,0 +1,407 @@
+#!/usr/bin/env bash
+# aris-base：ARIS-Codex base 工作区监控和接管入口。
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+
+usage() {
+  local code="${1:-2}"
+  cat >&2 <<'EOF'
+用法：
+  arisc base
+  arisc base status [--json] [--with-pane] [--pane-lines N]
+  arisc base watch [--interval N] [--with-pane] [--pane-lines N]
+  arisc base alerts [--summary] [--json] [--only X]
+  arisc base agenda [--json] [--only X]
+  arisc base summary [--json]
+  arisc base auto [auto 选项] <slug> -- <目标文本...>
+  arisc base triage [--with-pane] [--save]
+  arisc base report [--with-agenda] [--with-triage] [--save]
+  arisc base reports [--type report|triage|env|snapshot|status|doctor|audit|all]
+  arisc base snapshot [--with-pane] [--pane-lines N]
+  arisc base info [--json]
+  arisc base enter [Codex 参数...]
+  arisc base doctor [--json]
+  arisc base audit [--json]
+  arisc base init [--force-templates]
+
+作用：
+  base 工作区的统一监控和接管入口，复用已有 arisc 子命令。
+
+说明：
+  - arisc base 等价于 arisc base status。
+  - arisc base summary 输出当前告警、最新保存材料和诊断 JSON 路径、接管议程；支持 --json。
+  - arisc base auto 等价于 arisc auto。
+  - arisc base enter 等价于 arisc enter base。
+  - 本命令自身不创建普通项目、不发送消息、不删除项目。
+EOF
+  exit "$code"
+}
+
+json_escape() {
+  local s="${1:-}"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\b'/\\b}
+  s=${s//$'\f'/\\f}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+write_snapshot_error_json() {
+  local file="$1" label="$2"
+  printf '{"ok":false,"workspace_root":"%s","generated_at":"%s","error":"%s 生成失败，快照索引已继续生成"}\n' \
+    "$(json_escape "$WORKSPACE_ROOT")" \
+    "$(json_escape "$(date '+%Y-%m-%dT%H:%M:%S%z')")" \
+    "$(json_escape "$label")" > "$file"
+}
+
+save_snapshot_text_artifact() {
+  local label="$1" file="$2"
+  shift 2
+  echo "[INFO] 保存 ${label}：$file"
+  if ! "$@" >/dev/null; then
+    echo "[WARN] ${label}生成失败，继续生成快照索引：$file" >&2
+    if [[ ! -s "$file" ]]; then
+      {
+        echo "# ${label}生成失败"
+        echo ""
+        echo "- 生成时间：$(date '+%Y-%m-%dT%H:%M:%S%z')"
+        echo "- 工作区：$WORKSPACE_ROOT"
+        echo ""
+        echo "[WARN] 该项生成失败，快照索引已继续生成。"
+      } > "$file"
+    fi
+  fi
+}
+
+save_snapshot_json_artifact() {
+  local label="$1" file="$2"
+  shift 2
+  echo "[INFO] 保存 ${label}：$file"
+  if ! "$@" > "$file"; then
+    echo "[WARN] ${label}生成返回非零，继续生成快照索引：$file" >&2
+    if [[ ! -s "$file" ]]; then
+      write_snapshot_error_json "$file" "$label"
+    fi
+  fi
+}
+
+base_snapshot() {
+  local with_pane=false pane_lines=6
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --with-pane) with_pane=true; shift ;;
+      --pane-lines)
+        [[ $# -ge 2 ]] || { echo "[ERROR] --pane-lines 缺少数值" >&2; exit 2; }
+        pane_lines="$2"
+        [[ "$pane_lines" =~ ^[0-9]+$ && "$pane_lines" -gt 0 ]] || { echo "[ERROR] --pane-lines 必须是正整数：$pane_lines" >&2; exit 2; }
+        shift 2
+        ;;
+      --help|-h)
+        cat >&2 <<'EOF'
+用法：arisc base snapshot [--with-pane] [--pane-lines N]
+
+保存一次 base 接管快照到 reports/：
+  - 交接报告 aris-report-*.md
+  - 接管诊断 aris-triage-*.md
+  - 全环境导出 aris-env-export-all-*.md
+  - status/doctor/audit JSON
+  - 快照索引 aris-snapshot-*.md，包含接管议程摘要
+
+说明：本命令不创建普通项目、不启动 Codex、不发送消息、不删除项目。
+EOF
+        exit 0
+        ;;
+      *) echo "[ERROR] 未知 snapshot 参数：$1" >&2; exit 2 ;;
+    esac
+  done
+
+  local reports_dir="$WORKSPACE_ROOT/reports" ts generated_at
+  local report_file triage_file env_file status_file doctor_file audit_file snapshot_file
+  local report_args triage_args
+  reports_dir="${reports_dir%/}"
+  mkdir -p "$reports_dir"
+  ts="$(date +%Y%m%d-%H%M%S)"
+  generated_at="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  report_file="$reports_dir/aris-report-$ts.md"
+  triage_file="$reports_dir/aris-triage-$ts.md"
+  env_file="$reports_dir/aris-env-export-all-$ts.md"
+  status_file="$reports_dir/aris-status-$ts.json"
+  doctor_file="$reports_dir/aris-doctor-$ts.json"
+  audit_file="$reports_dir/aris-audit-$ts.json"
+  snapshot_file="$reports_dir/aris-snapshot-$ts.md"
+
+  report_args=(--with-agenda --with-triage --out "$report_file")
+  triage_args=(--out "$triage_file")
+  if $with_pane; then
+    report_args=(--with-pane --pane-lines "$pane_lines" "${report_args[@]}")
+    triage_args=(--with-pane --pane-lines "$pane_lines" "${triage_args[@]}")
+  fi
+
+  save_snapshot_text_artifact "交接报告" "$report_file" "$SCRIPT_DIR/aris-report" "${report_args[@]}"
+  save_snapshot_text_artifact "接管诊断" "$triage_file" "$SCRIPT_DIR/aris-triage" "${triage_args[@]}"
+  save_snapshot_text_artifact "全环境导出" "$env_file" "$SCRIPT_DIR/aris-env" export --all --out "$env_file"
+  save_snapshot_json_artifact "status JSON" "$status_file" "$SCRIPT_DIR/aris-status" --json
+  save_snapshot_json_artifact "doctor JSON" "$doctor_file" "$SCRIPT_DIR/aris-doctor" --json
+  save_snapshot_json_artifact "audit JSON" "$audit_file" "$SCRIPT_DIR/aris-audit" --json
+
+  {
+    echo "# ARIS-Codex Base 快照"
+    echo ""
+    echo "- 生成时间：$generated_at"
+    echo "- 工作区：$WORKSPACE_ROOT"
+    echo "- pane 摘要：$with_pane"
+    if $with_pane; then
+      echo "- pane 行数：$pane_lines"
+    fi
+    echo ""
+    echo "## 文件"
+    echo "- 交接报告：$report_file"
+    echo "- 接管诊断：$triage_file"
+    echo "- 全环境导出：$env_file"
+    echo "- status JSON：$status_file"
+    echo "- doctor JSON：$doctor_file"
+    echo "- audit JSON：$audit_file"
+    echo ""
+    echo "## 接管议程"
+    echo ""
+    if "$SCRIPT_DIR/aris-agenda" --embed; then
+      true
+    else
+      echo "[WARN] arisc agenda 生成失败"
+    fi
+    echo ""
+    echo "## 查看"
+    echo "  arisc reports --type snapshot --show latest"
+    echo "  arisc reports --type report --show latest"
+    echo "  arisc reports --type triage --show latest"
+    echo "  arisc reports --type env --show latest"
+    echo "  arisc reports --type status --show latest"
+    echo "  arisc reports --type doctor --show latest"
+    echo "  arisc reports --type audit --show latest"
+  } > "$snapshot_file"
+
+  echo "[OK] 快照索引：$snapshot_file"
+  echo ""
+  echo "查看："
+  echo "  arisc reports --type snapshot --show latest"
+  echo "  arisc reports --type status --show latest"
+  echo "  arisc reports --type doctor --show latest"
+  echo "  arisc reports --type audit --show latest"
+  echo "  arisc reports --type all"
+}
+
+latest_report_path() {
+  local type="$1"
+  local path
+  path="$("$SCRIPT_DIR/aris-reports" --type "$type" --path latest 2>/dev/null || true)"
+  if [[ -f "$path" ]]; then
+    printf '%s\n' "$path"
+  fi
+}
+
+json_optional_string() {
+  local value="${1:-}"
+  if [[ -n "$value" ]]; then
+    printf '"%s"' "$(json_escape "$value")"
+  else
+    printf 'null'
+  fi
+}
+
+base_summary_json() {
+  local snapshot_path="$1" report_path="$2" triage_path="$3" env_path="$4" status_path="$5" doctor_path="$6" audit_path="$7"
+  local alerts_json agenda_json
+  alerts_json="$("$SCRIPT_DIR/aris-alerts" --summary --json)"
+  agenda_json="$("$SCRIPT_DIR/aris-agenda" --json)"
+
+  printf '{"workspace_root":"%s","generated_at":"%s","latest":{' \
+    "$(json_escape "$WORKSPACE_ROOT")" \
+    "$(json_escape "$(date '+%Y-%m-%dT%H:%M:%S%z')")"
+  printf '"snapshot":'
+  json_optional_string "$snapshot_path"
+  printf ',"report":'
+  json_optional_string "$report_path"
+  printf ',"triage":'
+  json_optional_string "$triage_path"
+  printf ',"env":'
+  json_optional_string "$env_path"
+  printf ',"status":'
+  json_optional_string "$status_path"
+  printf ',"doctor":'
+  json_optional_string "$doctor_path"
+  printf ',"audit":'
+  json_optional_string "$audit_path"
+  printf '},"commands":["arisc reports --type snapshot --show latest","arisc reports --type status --show latest","arisc reports --type doctor --show latest","arisc reports --type audit --show latest","arisc reports --type all","arisc base agenda","arisc status"],'
+  printf '"alerts":%s,"agenda":%s}\n' "$alerts_json" "$agenda_json"
+}
+
+base_summary() {
+  local json=false
+  if [[ $# -gt 0 ]]; then
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --json)
+          json=true
+          shift
+          ;;
+        --help|-h)
+          cat >&2 <<'EOF'
+用法：arisc base summary [--json]
+
+作用：
+  只读输出一页 base 接管摘要：当前告警、最新保存材料和诊断 JSON 路径、查看命令和接管议程。
+
+选项：
+  --json  输出机器可读 JSON
+
+说明：本命令不创建普通项目、不启动 Codex、不发送消息、不删除项目。
+EOF
+          exit 0
+          ;;
+        *) echo "[ERROR] 未知 summary 参数：$1" >&2; exit 2 ;;
+      esac
+    done
+  fi
+
+  local snapshot_path report_path triage_path env_path status_path doctor_path audit_path
+  snapshot_path="$(latest_report_path snapshot)"
+  report_path="$(latest_report_path report)"
+  triage_path="$(latest_report_path triage)"
+  env_path="$(latest_report_path env)"
+  status_path="$(latest_report_path status)"
+  doctor_path="$(latest_report_path doctor)"
+  audit_path="$(latest_report_path audit)"
+
+  if $json; then
+    base_summary_json "$snapshot_path" "$report_path" "$triage_path" "$env_path" "$status_path" "$doctor_path" "$audit_path"
+    return 0
+  fi
+
+  echo "# ARIS-Codex Base 摘要"
+  echo ""
+  echo "- 生成时间：$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  echo "- 工作区：$WORKSPACE_ROOT"
+  echo ""
+  echo "## 当前告警"
+  if ! "$SCRIPT_DIR/aris-alerts" --summary; then
+    echo "[WARN] 告警摘要生成失败"
+  fi
+  echo ""
+  echo "## 最新保存材料"
+  if [[ -n "$snapshot_path" ]]; then
+    echo "- base 快照：$snapshot_path"
+  else
+    echo "- base 快照：无；生成命令：arisc base snapshot"
+  fi
+  if [[ -n "$report_path" ]]; then
+    echo "- 交接报告：$report_path"
+  else
+    echo "- 交接报告：无；生成命令：arisc report --save"
+  fi
+  if [[ -n "$triage_path" ]]; then
+    echo "- 接管诊断：$triage_path"
+  else
+    echo "- 接管诊断：无；生成命令：arisc triage --save"
+  fi
+  if [[ -n "$env_path" ]]; then
+    echo "- 环境导出：$env_path"
+  else
+    echo "- 环境导出：无；生成命令：arisc env export --all --save"
+  fi
+  if [[ -n "$status_path" ]]; then
+    echo "- status JSON：$status_path"
+  else
+    echo "- status JSON：无；生成命令：arisc base snapshot"
+  fi
+  if [[ -n "$doctor_path" ]]; then
+    echo "- doctor JSON：$doctor_path"
+  else
+    echo "- doctor JSON：无；生成命令：arisc base snapshot"
+  fi
+  if [[ -n "$audit_path" ]]; then
+    echo "- audit JSON：$audit_path"
+  else
+    echo "- audit JSON：无；生成命令：arisc base snapshot"
+  fi
+  echo ""
+  echo "## 查看命令"
+  echo "  arisc reports --type snapshot --show latest"
+  echo "  arisc reports --type status --show latest"
+  echo "  arisc reports --type doctor --show latest"
+  echo "  arisc reports --type audit --show latest"
+  echo "  arisc reports --type all"
+  echo "  arisc base agenda"
+  echo "  arisc status"
+  echo ""
+  echo "## 接管议程"
+  if ! "$SCRIPT_DIR/aris-agenda" --embed; then
+    echo "[WARN] 接管议程生成失败"
+  fi
+}
+
+if [[ $# -eq 0 ]]; then
+  exec "$SCRIPT_DIR/aris-status"
+fi
+
+sub="$1"
+shift
+
+case "$sub" in
+  status)
+    exec "$SCRIPT_DIR/aris-status" "$@"
+    ;;
+  watch|monitor)
+    exec "$SCRIPT_DIR/aris-watch" "$@"
+    ;;
+  alerts)
+    exec "$SCRIPT_DIR/aris-alerts" "$@"
+    ;;
+  agenda)
+    exec "$SCRIPT_DIR/aris-agenda" "$@"
+    ;;
+  summary|handoff-summary)
+    base_summary "$@"
+    ;;
+  auto)
+    exec "$SCRIPT_DIR/aris-auto" "$@"
+    ;;
+  triage)
+    exec "$SCRIPT_DIR/aris-triage" "$@"
+    ;;
+  report|handoff)
+    exec "$SCRIPT_DIR/aris-report" "$@"
+    ;;
+  reports)
+    exec "$SCRIPT_DIR/aris-reports" "$@"
+    ;;
+  snapshot)
+    base_snapshot "$@"
+    ;;
+  info)
+    exec "$SCRIPT_DIR/aris-info" base "$@"
+    ;;
+  enter)
+    exec "$SCRIPT_DIR/aris-enter" base "$@"
+    ;;
+  doctor)
+    exec "$SCRIPT_DIR/aris-doctor" "$@"
+    ;;
+  audit)
+    exec "$SCRIPT_DIR/aris-audit" "$@"
+    ;;
+  init|base-init)
+    exec "$SCRIPT_DIR/aris-base-init" "$@"
+    ;;
+  help|--help|-h)
+    usage 0
+    ;;
+  *)
+    echo "[ERROR] 未知 base 子命令：$sub" >&2
+    usage 2
+    ;;
+esac

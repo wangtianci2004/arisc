@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+# aris-watch：只读刷新 ARIS-Codex 工作区运行状态。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+TMUX_PREFIX="aris-codex"
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+INTERVAL=30
+ONCE=false
+WITH_PANE=false
+PANE_LINES=3
+CLEAR_SCREEN=true
+
+usage() {
+  local code="${1:-2}"
+  cat >&2 <<'EOF'
+用法：arisc watch [--once] [--interval N] [--with-pane] [--pane-lines N] [--no-clear]
+
+只读刷新 ARIS-Codex 工作区状态，适合在 base 之外的终端持续监控。
+
+选项：
+  --once          只输出一次，不循环
+  --interval N    刷新间隔秒数，默认 30
+  --with-pane     附加运行中 tmux pane 的末尾摘要，默认关闭
+  --pane-lines N  每个 pane 摘要行数，默认 3；仅在 --with-pane 时生效
+  --no-clear      循环刷新时不清屏
+
+说明：
+  - 本命令不创建项目、不启动 Codex、不发送消息、不删除文件。
+  - 需要交接报告时使用 arisc report；需要直接接管时使用 arisc enter <slug>。
+  - 需要集中查看阻塞、错误或等待人工输入的项目时使用 arisc alerts。
+EOF
+  exit "$code"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --once) ONCE=true; shift ;;
+    --interval)
+      [[ $# -ge 2 ]] || usage 2
+      INTERVAL="$2"
+      [[ "$INTERVAL" =~ ^[0-9]+$ && "$INTERVAL" -gt 0 ]] || { echo "[ERROR] --interval 必须是正整数：$INTERVAL" >&2; exit 2; }
+      shift 2
+      ;;
+    --with-pane) WITH_PANE=true; shift ;;
+    --pane-lines)
+      [[ $# -ge 2 ]] || usage 2
+      PANE_LINES="$2"
+      [[ "$PANE_LINES" =~ ^[0-9]+$ && "$PANE_LINES" -gt 0 ]] || { echo "[ERROR] --pane-lines 必须是正整数：$PANE_LINES" >&2; exit 2; }
+      shift 2
+      ;;
+    --no-clear) CLEAR_SCREEN=false; shift ;;
+    --help|-h) usage 0 ;;
+    *) echo "[ERROR] 未知参数：$1" >&2; usage 2 ;;
+  esac
+done
+
+run_section() {
+  local title="$1"
+  local code
+  shift
+  echo ""
+  echo "## $title"
+  set +e
+  "$@"
+  code=$?
+  set -e
+  if [[ "$code" -ne 0 ]]; then
+    echo "[WARN] $title 退出码：$code"
+  fi
+  return 0
+}
+
+workspace_sessions() {
+  if ! command -v tmux >/dev/null; then
+    return 0
+  fi
+
+  local projects_dir="$WORKSPACE_ROOT/projects"
+  local session proj slug
+
+  if [[ -d "$projects_dir/.codex" || -f "$projects_dir/AGENTS.md" ]]; then
+    session="$TMUX_PREFIX-base"
+    if tmux has-session -t "=$session" 2>/dev/null && session_matches_project "$session" "$projects_dir"; then
+      printf '%s\n' "$session"
+    fi
+  fi
+
+  [[ -d "$projects_dir" ]] || return 0
+  shopt -s nullglob
+  for proj in "$projects_dir"/*/; do
+    [[ -d "$proj" ]] || continue
+    slug="$(basename "$proj")"
+    session="$TMUX_PREFIX-$slug"
+    if tmux has-session -t "=$session" 2>/dev/null && session_matches_project "$session" "${proj%/}"; then
+      printf '%s\n' "$session"
+    fi
+  done
+  shopt -u nullglob
+}
+
+canonical_dir() {
+  (cd "$1" 2>/dev/null && pwd -P) || return 1
+}
+
+session_matches_project() {
+  local session="$1" project_dir="$2" session_cwd expected actual
+  session_cwd="$(tmux display-message -p -t "=$session:0.0" '#{pane_current_path}' 2>/dev/null || true)"
+  [[ -n "$session_cwd" ]] || return 1
+  expected="$(canonical_dir "$project_dir")" || return 1
+  actual="$(canonical_dir "$session_cwd")" || return 1
+  [[ "$actual" == "$expected" ]]
+}
+
+session_line() {
+  local session="$1" windows
+  windows="$(tmux list-windows -t "=$session" -F '#{window_index}' 2>/dev/null | wc -l | tr -d ' ')"
+  [[ -n "$windows" && "$windows" != "0" ]] || windows="?"
+  printf '%s: %s 个窗口\n' "$session" "$windows"
+}
+
+tmux_sessions() {
+  if ! command -v tmux >/dev/null; then
+    echo "tmux 不在 PATH 中"
+    return 0
+  fi
+  local out
+  out="$(
+    while IFS= read -r session; do
+      [[ -n "$session" ]] || continue
+      session_line "$session"
+    done < <(workspace_sessions)
+  )"
+  if [[ -z "$out" ]]; then
+    echo "(当前 workspace 没有运行中的 $TMUX_PREFIX-* 会话)"
+  else
+    echo "$out"
+  fi
+}
+
+pane_summary() {
+  if ! command -v tmux >/dev/null; then
+    echo "tmux 不在 PATH 中"
+    return 0
+  fi
+  local session
+  while IFS= read -r session; do
+    [[ -n "$session" ]] || continue
+    echo ""
+    echo "### $session"
+    tmux capture-pane -t "=$session:0.0" -p -S -2000 2>/dev/null | tail -n "$PANE_LINES" | sed 's/^/  /' || echo "  (无法读取 pane)"
+  done < <(workspace_sessions)
+}
+
+alert_summary() {
+  local summary_json code
+  if ! command -v jq >/dev/null; then
+    "$SCRIPT_DIR/aris-alerts" --summary
+    return 0
+  fi
+
+  set +e
+  summary_json="$("$SCRIPT_DIR/aris-alerts" --summary --json 2>/dev/null)"
+  code=$?
+  set -e
+  if [[ "$code" -ne 0 || -z "$summary_json" ]]; then
+    "$SCRIPT_DIR/aris-alerts" --summary
+    return 0
+  fi
+
+  printf "%-12s %s\n" "类型" "数量"
+  printf "%-12s %s\n" "----" "----"
+  printf '%s\n' "$summary_json" \
+    | jq -r '.summary | [["total", .total], ["blocked", .blocked], ["attention", .attention], ["waiting", .waiting], ["stopped", .stopped]][] | @tsv' \
+    | while IFS=$'\t' read -r kind count; do
+        printf "%-12s %s\n" "$kind" "$count"
+      done
+}
+
+snapshot() {
+  echo "# ARIS-Codex 运行监控"
+  echo ""
+  echo "- 生成时间：$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  echo "- 工作区：$WORKSPACE_ROOT"
+  if $ONCE; then
+    echo "- 模式：单次"
+  else
+    echo "- 模式：循环"
+    echo "- 刷新间隔：${INTERVAL}s"
+  fi
+
+  run_section "环境列表" "$SCRIPT_DIR/aris-ls"
+  run_section "Goal 状态" "$SCRIPT_DIR/aris-goal" --status
+  run_section "告警摘要" alert_summary
+  run_section "需要关注" "$SCRIPT_DIR/aris-alerts"
+  run_section "运行中的 ARIS-Codex tmux 会话" tmux_sessions
+  if $WITH_PANE; then
+    run_section "运行中 pane 摘要" pane_summary
+  fi
+
+  echo ""
+  echo "接管命令：arisc alerts；arisc enter <slug>；交接报告：arisc report；停止监控：Ctrl+C"
+}
+
+while true; do
+  if ! $ONCE && $CLEAR_SCREEN; then
+    clear 2>/dev/null || printf '\033[H\033[2J'
+  fi
+  snapshot
+  $ONCE && exit 0
+  sleep "$INTERVAL"
+done

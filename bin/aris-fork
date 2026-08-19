@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+# aris-fork：从已有研究工作区复制项目，并补齐 Codex 项目骨架。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+if [[ -z "${ARIS_REPO:-}" && -f "$WORKSPACE_ROOT/config" ]]; then
+  # shellcheck disable=SC1090
+  source "$WORKSPACE_ROOT/config"
+fi
+ARIS_REPO="${ARIS_REPO:-$HOME/work/aris-codex-skills}"
+CLAUDE_WORKSPACE_ROOT="${CLAUDE_WORKSPACE_ROOT:-$HOME/aris-workspace}"
+
+SLUG_RE='^[a-z0-9]+(-[a-z0-9]+)*$'
+SOURCE_NAME_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'
+
+require_codex_repo() {
+  if [[ ! -d "$ARIS_REPO" ]]; then
+    echo "[ERROR] ARIS_REPO 不存在：$ARIS_REPO" >&2
+    echo "        先运行：arisc repo" >&2
+    echo "        或临时指定：ARIS_REPO=/path/to/Auto-claude-code-research-in-sleep arisc fork <project_name> [new_name]" >&2
+    exit 1
+  fi
+  if [[ ! -x "$ARIS_REPO/tools/install_aris_codex.sh" ]]; then
+    echo "[ERROR] 找不到 Codex 技能安装器：$ARIS_REPO/tools/install_aris_codex.sh" >&2
+    echo "        请确认 ARIS_REPO 指向包含 tools/install_aris_codex.sh 的上游仓库。" >&2
+    exit 1
+  fi
+  if [[ ! -d "$ARIS_REPO/skills/skills-codex" ]]; then
+    echo "[ERROR] ARIS_REPO 缺少 skills/skills-codex：$ARIS_REPO" >&2
+    echo "        请运行 arisc repo 重新配置上游仓库。" >&2
+    exit 1
+  fi
+}
+
+usage() {
+  local code="${1:-2}"
+  cat >&2 <<'EOF'
+用法：arisc fork <project_name> [new_name]
+
+从已有研究工作区复制项目到当前 ARISC workspace，并补齐
+`arisc new` 默认创建的 Codex 项目骨架。
+
+参数：
+  project_name  旧 workspace 的 projects/<project_name> 目录名
+  new_name      可选；Codex 侧新项目名。省略时沿用 project_name
+
+规则：
+  - new_name 必须是 kebab-case，只能包含 a-z、0-9 和连字符。
+  - 旧 project_name 只作为源目录名，可以包含下划线；如果它不是 kebab-case，
+    必须显式提供 new_name。
+  - 目标项目已存在时会直接报错，不会覆盖。
+
+示例：
+  arisc fork ailab
+  arisc fork qwen_adalora2_delivery qwen-adalora2-delivery
+
+环境变量：
+  WORKSPACE_ROOT          默认：~/arisc
+  CLAUDE_WORKSPACE_ROOT   默认：~/aris-workspace
+  ARIS_REPO               默认：~/work/aris-codex-skills
+EOF
+  exit "$code"
+}
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage 0
+fi
+
+[[ $# -ge 1 && $# -le 2 ]] || usage 2
+
+SOURCE_PROJECT="$1"
+TARGET_SLUG="${2:-$SOURCE_PROJECT}"
+
+if ! [[ "$SOURCE_PROJECT" =~ $SOURCE_NAME_RE ]]; then
+  echo "[ERROR] project_name 必须是旧 projects/ 下的单级目录名：$SOURCE_PROJECT" >&2
+  exit 1
+fi
+
+if ! [[ "$TARGET_SLUG" =~ $SLUG_RE ]]; then
+  suggestion="$(printf '%s' "$SOURCE_PROJECT" | tr '[:upper:]_' '[:lower:]-' | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//; s/-+/-/g')"
+  echo "[ERROR] new_name 必须是 kebab-case：$TARGET_SLUG" >&2
+  if [[ $# -eq 1 && -n "$suggestion" && "$suggestion" =~ $SLUG_RE ]]; then
+    echo "        源项目名不是 Codex slug，请显式指定新名字，例如：" >&2
+    echo "        arisc fork $SOURCE_PROJECT $suggestion" >&2
+  fi
+  exit 1
+fi
+
+if [[ "$TARGET_SLUG" == "base" ]]; then
+  echo "[ERROR] base 是内置元环境，不能作为 fork 目标名" >&2
+  exit 1
+fi
+
+[[ -d "$WORKSPACE_ROOT" ]] || { echo "[ERROR] WORKSPACE_ROOT 不存在：$WORKSPACE_ROOT" >&2; exit 1; }
+[[ -d "$CLAUDE_WORKSPACE_ROOT" ]] || { echo "[ERROR] CLAUDE_WORKSPACE_ROOT 不存在：$CLAUDE_WORKSPACE_ROOT" >&2; exit 1; }
+require_codex_repo
+
+WORKSPACE_ROOT="$(cd "$WORKSPACE_ROOT" && pwd)"
+CLAUDE_WORKSPACE_ROOT="$(cd "$CLAUDE_WORKSPACE_ROOT" && pwd)"
+ARIS_REPO="$(cd "$ARIS_REPO" && pwd)"
+
+SRC="$CLAUDE_WORKSPACE_ROOT/projects/$SOURCE_PROJECT"
+DEST="$WORKSPACE_ROOT/projects/$TARGET_SLUG"
+
+[[ -d "$SRC" ]] || { echo "[ERROR] 找不到来源项目：$SRC" >&2; exit 1; }
+[[ ! -e "$DEST" ]] || { echo "[ERROR] 目标项目已存在：$DEST" >&2; exit 1; }
+[[ -f "$WORKSPACE_ROOT/shared/env" ]] || { echo "[ERROR] 缺少 $WORKSPACE_ROOT/shared/env" >&2; exit 1; }
+[[ -f "$WORKSPACE_ROOT/shared/mcp.json" ]] || { echo "[ERROR] 缺少 $WORKSPACE_ROOT/shared/mcp.json" >&2; exit 1; }
+[[ -f "$WORKSPACE_ROOT/templates/pyproject.toml" ]] || { echo "[ERROR] 缺少 $WORKSPACE_ROOT/templates/pyproject.toml" >&2; exit 1; }
+[[ -f "$WORKSPACE_ROOT/templates/RESEARCH_BRIEF.md" ]] || { echo "[ERROR] 缺少 $WORKSPACE_ROOT/templates/RESEARCH_BRIEF.md" >&2; exit 1; }
+[[ -f "$WORKSPACE_ROOT/templates/gitignore" ]] || { echo "[ERROR] 缺少 $WORKSPACE_ROOT/templates/gitignore" >&2; exit 1; }
+command -v rsync >/dev/null || { echo "[ERROR] rsync 不在 PATH 中" >&2; exit 1; }
+command -v uv >/dev/null || { echo "[ERROR] uv 不在 PATH 中" >&2; exit 1; }
+command -v git >/dev/null || { echo "[ERROR] git 不在 PATH 中" >&2; exit 1; }
+
+mkdir -p "$WORKSPACE_ROOT/projects"
+
+echo "[INFO] fork 源项目：$SRC"
+echo "[INFO] fork 目标：$DEST"
+echo "[INFO] 复制项目文件，排除来源会话目录和 ARISC 重建项"
+
+RSYNC_EXCLUDES=(
+  --exclude='.claude/'
+  --exclude='.venv/'
+  --exclude='.agents/'
+  --exclude='.codex/'
+  --exclude='.env'
+  --exclude='.mcp.json'
+  --exclude='.aris/installed-skills.txt'
+  --exclude='.aris/installed-skills-codex.txt'
+  --exclude='.aris/installed-skills-codex.txt.prev'
+  --exclude='.aris/.install-codex.lock.d/'
+)
+
+mkdir -p "$DEST"
+rsync -a "${RSYNC_EXCLUDES[@]}" "$SRC/" "$DEST/"
+
+cd "$DEST"
+
+echo "[INFO] 清理 Claude/Codex 运行态残留"
+rm -rf .claude .venv .agents .codex
+rm -f .env .mcp.json
+rm -f .aris/installed-skills.txt .aris/installed-skills-codex.txt .aris/installed-skills-codex.txt.prev
+rm -rf .aris/.install-codex.lock.d
+if [[ -f CLAUDE.md && ! -e CLAUDE.md.fork-source ]]; then
+  mv CLAUDE.md CLAUDE.md.fork-source
+fi
+
+echo "[INFO] 链接 Codex workspace 共享配置"
+ln -s "$WORKSPACE_ROOT/shared/env" .env
+ln -s "$WORKSPACE_ROOT/shared/mcp.json" .mcp.json
+
+ensure_trailing_newline() {
+  local file="$1"
+  [[ -f "$file" && -s "$file" ]] || return 0
+  if [[ "$(tail -c 1 "$file" | wc -l | tr -d ' ')" == "0" ]]; then
+    printf '\n' >> "$file"
+  fi
+}
+
+ensure_gitignore_rule() {
+  local rule="$1"
+  if ! grep -qxF "$rule" .gitignore; then
+    ensure_trailing_newline .gitignore
+    printf '%s\n' "$rule" >> .gitignore
+  fi
+}
+
+echo "[INFO] 补齐项目模板和忽略规则"
+if [[ ! -f .gitignore ]]; then
+  cp "$WORKSPACE_ROOT/templates/gitignore" .gitignore
+fi
+for rule in .env .mcp.json .venv/ .aris/ .agents/ .codex/ research-wiki/ '*.log' __pycache__/ '*.pyc'; do
+  ensure_gitignore_rule "$rule"
+done
+
+if [[ ! -f RESEARCH_BRIEF.md ]]; then
+  cp "$WORKSPACE_ROOT/templates/RESEARCH_BRIEF.md" RESEARCH_BRIEF.md
+fi
+
+if [[ -f pyproject.toml ]]; then
+  current_project_name="$(awk -F'"' '/^[[:space:]]*name[[:space:]]*=/{print $2; exit}' pyproject.toml)"
+  if [[ "$current_project_name" == "$SOURCE_PROJECT" && "$TARGET_SLUG" != "$SOURCE_PROJECT" ]]; then
+    tmp_pyproject="$(mktemp)"
+    awk -v new="$TARGET_SLUG" '
+      /^[[:space:]]*name[[:space:]]*=/ && !done {
+        print "name = \"" new "\""
+        done=1
+        next
+      }
+      { print }
+    ' pyproject.toml > "$tmp_pyproject"
+    mv "$tmp_pyproject" pyproject.toml
+  fi
+else
+  sed "s/{{SLUG}}/$TARGET_SLUG/g" "$WORKSPACE_ROOT/templates/pyproject.toml" > pyproject.toml
+fi
+
+echo "[INFO] 创建 uv 虚拟环境"
+uv venv --quiet
+
+echo "[INFO] 初始化 Codex 项目目录"
+mkdir -p .codex .agents/skills .aris
+if [[ -e .aris/tools && ! -L .aris/tools ]]; then
+  echo "[WARN] 跳过 .aris/tools：目标不是符号链接：$DEST/.aris/tools" >&2
+else
+  ln -sfn "$ARIS_REPO/tools" .aris/tools
+fi
+cat > .codex/aris.env <<EOF
+ARIS_ENV_NAME="$TARGET_SLUG"
+ARIS_WORKSPACE_ROOT="$WORKSPACE_ROOT"
+ARIS_REPO="$ARIS_REPO"
+ARIS_FORKED_FROM="$SRC"
+ARIS_FORKED_FROM_PROJECT="$SOURCE_PROJECT"
+EOF
+
+echo "[INFO] 安装 ARIS Codex 技能"
+INSTALL_LOG="$(mktemp)"
+if ! bash "$ARIS_REPO/tools/install_aris_codex.sh" "$DEST" --aris-repo "$ARIS_REPO" --quiet >"$INSTALL_LOG" 2>&1; then
+  echo "[ERROR] install_aris_codex.sh 执行失败，日志如下：" >&2
+  cat "$INSTALL_LOG" >&2
+  rm -f "$INSTALL_LOG"
+  exit 1
+fi
+grep -E 'Plan summary|updated AGENTS|Install complete|Reconcile complete|Codex install complete' "$INSTALL_LOG" | sed 's/^/[INFO] /' || echo "[INFO] Codex 技能安装完成"
+rm -f "$INSTALL_LOG"
+
+SHARED_SKILLS="$WORKSPACE_ROOT/shared/skills"
+if [[ -d "$SHARED_SKILLS" ]]; then
+  echo "[INFO] 叠加 workspace 共享技能：$SHARED_SKILLS"
+  mkdir -p "$DEST/.agents/skills"
+  for src in "$SHARED_SKILLS"/*/; do
+    [[ -d "$src" ]] || continue
+    name="$(basename "$src")"
+    dst="$DEST/.agents/skills/$name"
+    if [[ -e "$dst" && ! -L "$dst" ]]; then
+      echo "[WARN] 跳过 ${name}：目标不是符号链接：$dst" >&2
+      continue
+    fi
+    ln -sfn "${src%/}" "$dst"
+    echo "[INFO] + $name"
+  done
+fi
+
+if [[ -f .git && ! -d .git ]]; then
+  echo "[WARN] 检测到 .git 文件，可能指向旧 workspace；已保留为 .git.fork-source 并初始化新 Git 仓库" >&2
+  mv .git .git.fork-source
+fi
+
+if [[ -d .git ]]; then
+  echo "[INFO] 保留源项目 Git 仓库；Codex 骨架改动保留为未提交变更"
+else
+  echo "[INFO] 初始化项目 Git 仓库"
+  git init -q
+  git add .gitignore RESEARCH_BRIEF.md pyproject.toml AGENTS.md
+  git -c user.email=aris@local -c user.name=aris commit -q -m "初始化 ARIS-Codex fork 项目骨架" 2>/dev/null || true
+fi
+
+cat <<EOF
+
+[OK] 已 fork 到 $DEST
+
+来源：
+  来源项目：$SRC
+
+已处理：
+  - 未复制 .claude/、.venv/、.agents/、.codex/ 和旧 manifest
+  - 已链接当前 Codex workspace 的 .env 与 .mcp.json
+  - 已安装 skills/skills-codex 并写入 .aris/installed-skills-codex.txt
+  - 已创建新的 .venv/ 与 .codex/aris.env
+
+注意：
+  来源项目的会话历史不会被迁移或解析。
+  Codex 会话由 ~/.codex/sessions 管理。
+
+下一步：
+  arisc enter $TARGET_SLUG
+EOF

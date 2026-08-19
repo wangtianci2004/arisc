@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+# aris-agenda：基于告警状态生成只读接管议程。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+ONLY=""
+SORT="severity"
+JSON=false
+EMBED=false
+
+usage() {
+  local code="${1:-2}"
+  cat >&2 <<'EOF'
+用法：arisc agenda [--json] [--only blocked|attention|waiting|stopped] [--sort severity|name] [--embed]
+
+作用：
+  基于 arisc alerts 生成只读接管议程，按优先级列出需要关注的项目、
+  建议动作和下一步命令。它不创建项目、不启动 Codex、不发送消息。
+
+选项：
+  --json     输出机器可读 JSON
+  --only X   只处理 blocked、attention、waiting 或 stopped 中的一类
+  --sort X   按 severity 或 name 排序，默认 severity
+  --embed    省略顶层标题，供 arisc report --with-agenda 内部嵌入使用
+EOF
+  exit "$code"
+}
+
+json_escape() {
+  local s="${1:-}"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\b'/\\b}
+  s=${s//$'\f'/\\f}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+json_string_array() {
+  local first=true item
+  printf '['
+  for item in "$@"; do
+    if $first; then
+      first=false
+    else
+      printf ','
+    fi
+    printf '"%s"' "$(json_escape "$item")"
+  done
+  printf ']'
+}
+
+item_kind() {
+  local tmux_state="$1" pane_status="$2"
+  if [[ "$pane_status" == "blocked" ]]; then
+    echo "blocked"
+  elif [[ "$pane_status" == "waiting" ]]; then
+    echo "waiting"
+  elif [[ "$pane_status" == "attention" ]]; then
+    echo "attention"
+  elif [[ "$tmux_state" == "stopped" ]]; then
+    echo "stopped"
+  else
+    echo "$pane_status"
+  fi
+}
+
+priority_for_kind() {
+  case "$1" in
+    blocked) echo 1 ;;
+    waiting) echo 2 ;;
+    attention) echo 3 ;;
+    stopped) echo 4 ;;
+    *) echo 9 ;;
+  esac
+}
+
+reason_for_kind() {
+  local kind="$1" mode="$2"
+  case "$kind" in
+    blocked) echo "目标已阻塞，需要人工判断是否继续、改目标或补充上下文" ;;
+    waiting) echo "会话疑似等待确认或输入，先确认 pane 中的等待内容" ;;
+    attention) echo "会话疑似报错、断流或需要关注，先检查最近输出" ;;
+    stopped)
+      if [[ "$mode" == "external" || "$mode" == "-" ]]; then
+        echo "会话已停止或不可见，先确认是否需要重新进入项目"
+      else
+        echo "有 goal 记录但会话已停止，先查看最近目标再决定是否 resume"
+      fi
+      ;;
+    *) echo "状态需要人工确认" ;;
+  esac
+}
+
+first_action_for_kind() {
+  case "$1" in
+    blocked) echo "先运行 inspect --with-pane，确认阻塞原因" ;;
+    waiting) echo "先 peek pane，确认等待的具体输入" ;;
+    attention) echo "先 peek pane，再按错误类型决定是否 send dry-run" ;;
+    stopped) echo "先查看 goal 记录和项目状态，再决定是否 enter 或 goal --resume" ;;
+    *) echo "先运行 inspect" ;;
+  esac
+}
+
+commands_for_item() {
+  local slug="$1" kind="$2"
+  case "$kind" in
+    blocked)
+      printf '%s\n' \
+        "arisc inspect $slug --with-pane --pane-lines 20" \
+        "arisc goal --peek $slug 40" \
+        "arisc send $slug --dry-run -- <message>" \
+        "arisc enter $slug"
+      ;;
+    waiting)
+      printf '%s\n' \
+        "arisc goal --peek $slug 40" \
+        "arisc inspect $slug --with-pane --pane-lines 20" \
+        "arisc send $slug --dry-run -- <message>"
+      ;;
+    attention)
+      printf '%s\n' \
+        "arisc goal --peek $slug 60" \
+        "arisc inspect $slug --with-pane --pane-lines 20" \
+        "arisc send $slug --dry-run -- <message>"
+      ;;
+    stopped)
+      printf '%s\n' \
+        "arisc goal --show $slug" \
+        "arisc inspect $slug" \
+        "arisc goal $slug --resume -- <goal>"
+      ;;
+    *)
+      printf '%s\n' \
+        "arisc inspect $slug --with-pane --pane-lines 20"
+      ;;
+  esac
+}
+
+read_alerts_json() {
+  local args=(--summary --json --sort "$SORT")
+  if [[ -n "$ONLY" ]]; then
+    args+=(--only "$ONLY")
+  fi
+  "$SCRIPT_DIR/aris-alerts" "${args[@]}"
+}
+
+render_text() {
+  local alerts_json total blocked attention waiting stopped count
+  alerts_json="$(read_alerts_json)"
+  total="$(printf '%s\n' "$alerts_json" | jq -r '.summary.total')"
+  blocked="$(printf '%s\n' "$alerts_json" | jq -r '.summary.blocked')"
+  attention="$(printf '%s\n' "$alerts_json" | jq -r '.summary.attention')"
+  waiting="$(printf '%s\n' "$alerts_json" | jq -r '.summary.waiting')"
+  stopped="$(printf '%s\n' "$alerts_json" | jq -r '.summary.stopped')"
+
+  if ! $EMBED; then
+    echo "# ARIS-Codex 接管议程"
+    echo ""
+  fi
+  echo "- 生成时间：$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  echo "- 工作区：$WORKSPACE_ROOT"
+  if [[ -n "$ONLY" ]]; then
+    echo "- 筛选：$ONLY"
+  else
+    echo "- 筛选：blocked、attention、waiting、stopped"
+  fi
+  echo "- 排序：$SORT"
+  echo ""
+  if $EMBED; then
+    echo "### 告警摘要"
+  else
+    echo "## 告警摘要"
+  fi
+  printf "%-12s %s\n" "类型" "数量"
+  printf "%-12s %s\n" "----" "----"
+  printf "%-12s %s\n" "total" "$total"
+  printf "%-12s %s\n" "blocked" "$blocked"
+  printf "%-12s %s\n" "attention" "$attention"
+  printf "%-12s %s\n" "waiting" "$waiting"
+  printf "%-12s %s\n" "stopped" "$stopped"
+
+  echo ""
+  if $EMBED; then
+    echo "### 处理顺序"
+  else
+    echo "## 处理顺序"
+  fi
+  if [[ "$total" == "0" ]]; then
+    echo "[OK] 当前没有需要接管的项目"
+    return 0
+  fi
+
+  count=0
+  printf '%s\n' "$alerts_json" | jq -r '.items[] | [.slug, .tmux_state, .pane_status, .mode, .goal_preview] | @tsv' \
+    | while IFS=$'\t' read -r slug tmux_state pane_status mode preview; do
+        count=$((count + 1))
+        kind="$(item_kind "$tmux_state" "$pane_status")"
+        echo ""
+        if $EMBED; then
+          echo "#### $count. $slug [$kind]"
+        else
+          echo "### $count. $slug [$kind]"
+        fi
+        echo "- 状态：tmux=${tmux_state}；pane=${pane_status}；mode=$mode"
+        echo "- 原因：$(reason_for_kind "$kind" "$mode")"
+        echo "- 建议：$(first_action_for_kind "$kind")"
+        echo "- 摘要：$preview"
+        echo "- 命令："
+        commands_for_item "$slug" "$kind" | sed 's/^/  /'
+      done
+
+  echo ""
+  if $EMBED; then
+    echo "### 总体建议"
+  else
+    echo "## 总体建议"
+  fi
+  echo "1. 先处理 blocked 和 waiting，再处理 attention，最后处理 stopped。"
+  echo "2. 发送消息前先使用 arisc send <slug> --dry-run -- <message> 预览目标 pane。"
+  echo "3. 需要完整诊断时运行 arisc triage --with-pane --pane-lines 20。"
+}
+
+render_json() {
+  local alerts_json first=true slug tmux_state pane_status mode preview kind priority reason action
+  local -a commands
+  alerts_json="$(read_alerts_json)"
+  printf '{"workspace_root":"%s","generated_at":"%s","only":"%s","sort":"%s","summary":%s,"items":[' \
+    "$(json_escape "$WORKSPACE_ROOT")" \
+    "$(json_escape "$(date '+%Y-%m-%dT%H:%M:%S%z')")" \
+    "$(json_escape "$ONLY")" \
+    "$(json_escape "$SORT")" \
+    "$(printf '%s\n' "$alerts_json" | jq -c '.summary')"
+  while IFS=$'\t' read -r slug tmux_state pane_status mode preview; do
+    [[ -n "$slug" ]] || continue
+    kind="$(item_kind "$tmux_state" "$pane_status")"
+    priority="$(priority_for_kind "$kind")"
+    reason="$(reason_for_kind "$kind" "$mode")"
+    action="$(first_action_for_kind "$kind")"
+    mapfile -t commands < <(commands_for_item "$slug" "$kind")
+    if $first; then
+      first=false
+    else
+      printf ','
+    fi
+    printf '{"slug":"%s","kind":"%s","priority":%s,"tmux_state":"%s","pane_status":"%s","mode":"%s","goal_preview":"%s","reason":"%s","first_action":"%s","commands":' \
+      "$(json_escape "$slug")" \
+      "$(json_escape "$kind")" \
+      "$priority" \
+      "$(json_escape "$tmux_state")" \
+      "$(json_escape "$pane_status")" \
+      "$(json_escape "$mode")" \
+      "$(json_escape "$preview")" \
+      "$(json_escape "$reason")" \
+      "$(json_escape "$action")"
+    json_string_array "${commands[@]}"
+    printf '}'
+  done < <(printf '%s\n' "$alerts_json" | jq -r '.items[] | [.slug, .tmux_state, .pane_status, .mode, .goal_preview] | @tsv')
+  printf ']}\n'
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON=true; shift ;;
+    --only)
+      [[ $# -ge 2 ]] || usage 2
+      case "$2" in
+        blocked|attention|waiting|stopped) ONLY="$2" ;;
+        *) echo "[ERROR] --only 只能是 blocked、attention、waiting 或 stopped：$2" >&2; exit 2 ;;
+      esac
+      shift 2
+      ;;
+    --sort)
+      [[ $# -ge 2 ]] || usage 2
+      case "$2" in
+        severity|name) SORT="$2" ;;
+        *) echo "[ERROR] --sort 只能是 severity 或 name：$2" >&2; exit 2 ;;
+      esac
+      shift 2
+      ;;
+    --help|-h) usage 0 ;;
+    --embed) EMBED=true; shift ;;
+    *) echo "[ERROR] 未知参数：$1" >&2; usage 2 ;;
+  esac
+done
+
+command -v jq >/dev/null || { echo "[ERROR] jq 不在 PATH 中" >&2; exit 1; }
+
+if $JSON; then
+  render_json
+else
+  render_text
+fi

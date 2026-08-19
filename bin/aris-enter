@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+# aris-enter：为每个 ARIS-Codex 环境管理一个 tmux 后台会话。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+TMUX_PREFIX="aris-codex"
+CODEX_BIN="${CODEX_BIN:-codex}"
+
+workspace_sessions() {
+  local projects_dir="$WORKSPACE_ROOT/projects"
+  local session proj slug
+
+  if [[ -d "$projects_dir/.codex" || -f "$projects_dir/AGENTS.md" ]]; then
+    session="$TMUX_PREFIX-base"
+    if tmux has-session -t "=$session" 2>/dev/null && session_matches_project "$session" "$projects_dir"; then
+      printf '%s\n' "$session"
+    fi
+  fi
+
+  [[ -d "$projects_dir" ]] || return 0
+  shopt -s nullglob
+  for proj in "$projects_dir"/*/; do
+    [[ -d "$proj" ]] || continue
+    slug="$(basename "$proj")"
+    session="$TMUX_PREFIX-$slug"
+    if tmux has-session -t "=$session" 2>/dev/null && session_matches_project "$session" "${proj%/}"; then
+      printf '%s\n' "$session"
+    fi
+  done
+  shopt -u nullglob
+}
+
+canonical_dir() {
+  (cd "$1" 2>/dev/null && pwd -P) || return 1
+}
+
+ensure_session_matches_project() {
+  local session="$1" project_dir="$2" session_cwd expected actual
+  session_cwd="$(tmux display-message -p -t "=$session:0.0" '#{pane_current_path}' 2>/dev/null || true)"
+  if [[ -z "$session_cwd" ]]; then
+    echo "[ERROR] 无法读取 tmux pane 当前目录，拒绝操作：$session" >&2
+    exit 1
+  fi
+  if ! expected="$(canonical_dir "$project_dir")"; then
+    echo "[ERROR] 无法解析当前项目目录，拒绝操作：$project_dir" >&2
+    exit 1
+  fi
+  if ! actual="$(canonical_dir "$session_cwd")"; then
+    echo "[ERROR] 无法解析 tmux pane 当前目录，拒绝操作：$session_cwd" >&2
+    exit 1
+  fi
+  if [[ "$actual" != "$expected" ]]; then
+    echo "[ERROR] 已存在同名 tmux 会话，但它不属于当前项目目录：$session" >&2
+    echo "        当前项目：$expected" >&2
+    echo "        会话目录：$actual" >&2
+    echo "        请使用不同 slug，或确认后手动处理该 tmux 会话。" >&2
+    exit 1
+  fi
+}
+
+session_matches_project() {
+  local session="$1" project_dir="$2" session_cwd expected actual
+  session_cwd="$(tmux display-message -p -t "=$session:0.0" '#{pane_current_path}' 2>/dev/null || true)"
+  [[ -n "$session_cwd" ]] || return 1
+  expected="$(canonical_dir "$project_dir")" || return 1
+  actual="$(canonical_dir "$session_cwd")" || return 1
+  [[ "$actual" == "$expected" ]]
+}
+
+session_line() {
+  local session="$1" windows
+  windows="$(tmux list-windows -t "=$session" -F '#{window_index}' 2>/dev/null | wc -l | tr -d ' ')"
+  [[ -n "$windows" && "$windows" != "0" ]] || windows="?"
+  printf '%s: %s 个窗口\n' "$session" "$windows"
+}
+
+usage() {
+  cat >&2 <<'EOF'
+用法：
+  arisc enter <slug> [Codex 参数...]
+  arisc enter --list
+  arisc enter --kill <slug>
+
+参数：
+  --new          强制启动新的 Codex 会话，不自动 resume
+  --happy        ARIS-Codex 暂不支持 happy，传入时会明确报错
+  --list         列出运行中的 aris-codex tmux 会话
+  --kill <slug>  结束指定 tmux 会话；Codex 全局会话历史不移动
+
+默认行为：
+  1. 如果 tmux 会话 aris-codex-<slug> 已存在，则直接连接。
+  2. 否则在项目目录启动新的 tmux 会话。
+  3. 非 --new 模式优先执行 codex resume --last；如果当前目录没有可恢复会话，Codex 会自行提示或退出。
+
+环境变量：
+  CODEX_BIN      默认：codex；可用于切换 Codex 二进制或隔离测试
+EOF
+  if [[ -d "$WORKSPACE_ROOT/projects" ]]; then
+    echo "" >&2
+    echo "可用项目：" >&2
+    for project_dir in "$WORKSPACE_ROOT/projects"/*/; do
+      [[ -d "$project_dir" ]] || continue
+      printf '  %s\n' "$(basename "${project_dir%/}")"
+    done | sort >&2
+  fi
+  exit 2
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --help|-h) usage ;;
+  esac
+done
+
+if [[ "${1:-}" == "--list" ]]; then
+  command -v tmux >/dev/null || { echo "[ERROR] tmux 不在 PATH 中" >&2; exit 1; }
+  out="$(
+    while IFS= read -r session; do
+      [[ -n "$session" ]] || continue
+      session_line "$session"
+    done < <(workspace_sessions)
+  )"
+  if [[ -z "$out" ]]; then
+    echo "[INFO] 当前 workspace 没有运行中的 aris-codex tmux 会话"
+  else
+    echo "$out"
+  fi
+  exit 0
+fi
+
+if [[ "${1:-}" == "--kill" ]]; then
+  command -v tmux >/dev/null || { echo "[ERROR] tmux 不在 PATH 中" >&2; exit 1; }
+  [[ $# -ge 2 ]] || { echo "[ERROR] 用法：arisc enter --kill <slug>" >&2; exit 2; }
+  SLUG_TO_KILL="$2"
+  TS="$TMUX_PREFIX-$SLUG_TO_KILL"
+  if tmux has-session -t "=$TS" 2>/dev/null; then
+    if [[ "$SLUG_TO_KILL" == "base" ]]; then
+      KILL_PROJ="$WORKSPACE_ROOT/projects"
+    else
+      KILL_PROJ="$WORKSPACE_ROOT/projects/$SLUG_TO_KILL"
+    fi
+    ensure_session_matches_project "$TS" "$KILL_PROJ"
+    tmux kill-session -t "=$TS"
+    echo "[OK] 已结束 ${TS}；Codex 会话历史由 ~/.codex/sessions 管理"
+  else
+    echo "[INFO] 不存在会话 $TS"
+  fi
+  exit 0
+fi
+
+[[ $# -ge 1 ]] || usage
+command -v tmux >/dev/null || { echo "[ERROR] tmux 不在 PATH 中" >&2; exit 1; }
+command -v "$CODEX_BIN" >/dev/null || { echo "[ERROR] $CODEX_BIN 不在 PATH 中" >&2; exit 1; }
+
+SLUG="$1"
+shift
+
+if [[ "$SLUG" == "base" ]]; then
+  PROJ="$WORKSPACE_ROOT/projects"
+  [[ -d "$PROJ" ]] || { echo "[ERROR] 不存在目录：$PROJ" >&2; exit 1; }
+  BASE_INIT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/aris-base-init"
+  [[ -x "$BASE_INIT" ]] && WORKSPACE_ROOT="$WORKSPACE_ROOT" "$BASE_INIT" >/dev/null
+else
+  PROJ="$WORKSPACE_ROOT/projects/$SLUG"
+  [[ -d "$PROJ" ]] || { echo "[ERROR] 不存在项目：$PROJ" >&2; exit 1; }
+  mkdir -p "$PROJ/.codex"
+fi
+
+NEW_SESSION=false
+CODEX_ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --new) NEW_SESSION=true ;;
+    --happy)
+      echo "[ERROR] ARIS-Codex 暂不支持 happy；请使用：arisc enter $SLUG" >&2
+      exit 2
+      ;;
+    *) CODEX_ARGS+=("$arg") ;;
+  esac
+done
+
+TMUX_SESSION="$TMUX_PREFIX-$SLUG"
+if tmux has-session -t "=$TMUX_SESSION" 2>/dev/null; then
+  ensure_session_matches_project "$TMUX_SESSION" "$PROJ"
+  echo "[INFO] 连接运行中的会话：$TMUX_SESSION"
+  exec tmux attach -t "=$TMUX_SESSION"
+fi
+
+CODEX_CMD="$(printf '%q' "$CODEX_BIN")"
+if ! $NEW_SESSION; then
+  CODEX_CMD="$(printf '%q' "$CODEX_BIN") resume --last"
+fi
+for a in "${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"}"; do
+  CODEX_CMD+=" $(printf '%q' "$a")"
+done
+
+if ! $NEW_SESSION; then
+  echo "[INFO] 如果 Codex 提示当前目录无可恢复会话，请重新运行：arisc enter $SLUG --new"
+fi
+echo "[INFO] 新建 tmux 会话 $TMUX_SESSION -> $CODEX_CMD"
+exec tmux new-session -s "$TMUX_SESSION" -c "$PROJ" "$CODEX_CMD"

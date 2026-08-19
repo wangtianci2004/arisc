@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# aris-send：向当前 workspace 的项目 Codex tmux 会话发送单行指令。
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  TARGET="$(readlink "$SOURCE")"
+  if [[ "$TARGET" == /* ]]; then
+    SOURCE="$TARGET"
+  else
+    SOURCE="$DIR/$TARGET"
+  fi
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+TMUX_PREFIX="aris-codex"
+SLUG_RE='^[a-z0-9]+(-[a-z0-9]+)*$'
+
+DRY_RUN=false
+PANE_LINES=40
+
+usage() {
+  local code="${1:-2}"
+  cat >&2 <<'EOF'
+用法：
+  arisc send <slug> [--dry-run] [--pane-lines N] -- <message...>
+  arisc send <slug> <message...>
+
+作用：
+  向当前 workspace 中正在运行的项目 Codex tmux 会话发送一行指令。
+
+选项：
+  --dry-run       只预览目标 pane 和待发送消息，不实际发送
+  --pane-lines N  预览目标 pane 末尾 N 行，默认 40
+
+安全规则：
+  - 目标必须是普通项目，不能是 base。
+  - 只会操作 pane 当前目录匹配 WORKSPACE_ROOT/projects/<slug> 的 tmux 会话。
+  - 如果存在同名 tmux 会话但目录不匹配，会拒绝发送。
+EOF
+  exit "$code"
+}
+
+canonical_dir() {
+  (cd "$1" 2>/dev/null && pwd -P) || return 1
+}
+
+pane_target() {
+  printf '=%s:0.0\n' "$1"
+}
+
+ensure_session_matches_project() {
+  local session="$1" project_dir="$2" session_cwd expected actual
+  session_cwd="$(tmux display-message -p -t "$(pane_target "$session")" '#{pane_current_path}' 2>/dev/null || true)"
+  if [[ -z "$session_cwd" ]]; then
+    echo "[ERROR] 无法读取 tmux pane 当前目录，拒绝发送：$session" >&2
+    exit 1
+  fi
+  if ! expected="$(canonical_dir "$project_dir")"; then
+    echo "[ERROR] 无法解析当前项目目录，拒绝发送：$project_dir" >&2
+    exit 1
+  fi
+  if ! actual="$(canonical_dir "$session_cwd")"; then
+    echo "[ERROR] 无法解析 tmux pane 当前目录，拒绝发送：$session_cwd" >&2
+    exit 1
+  fi
+  if [[ "$actual" != "$expected" ]]; then
+    echo "[ERROR] 同名 tmux 会话不属于当前项目，拒绝发送：$session" >&2
+    echo "        当前项目：$expected" >&2
+    echo "        会话目录：$actual" >&2
+    exit 1
+  fi
+}
+
+capture_pane_tail() {
+  local session="$1" lines="$2"
+  tmux capture-pane -t "$(pane_target "$session")" -p -S -2000 | tail -n "$lines"
+}
+
+if [[ $# -lt 1 ]]; then
+  usage 2
+fi
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage 0
+fi
+
+SLUG="$1"
+shift
+
+if ! [[ "$SLUG" =~ $SLUG_RE ]]; then
+  echo "[ERROR] slug 必须是 kebab-case：$SLUG" >&2
+  exit 1
+fi
+if [[ "$SLUG" == "base" ]]; then
+  echo "[ERROR] 拒绝发送给 base，避免自递归" >&2
+  exit 1
+fi
+
+MSG_PARTS=()
+STOP_OPTIONS=false
+while [[ $# -gt 0 ]]; do
+  if ! $STOP_OPTIONS; then
+    case "$1" in
+      --dry-run) DRY_RUN=true; shift; continue ;;
+      --pane-lines)
+        [[ $# -ge 2 ]] || usage 2
+        PANE_LINES="$2"
+        [[ "$PANE_LINES" =~ ^[0-9]+$ && "$PANE_LINES" -gt 0 ]] || { echo "[ERROR] --pane-lines 必须是正整数：$PANE_LINES" >&2; exit 2; }
+        shift 2
+        continue
+        ;;
+      --) STOP_OPTIONS=true; shift; continue ;;
+      --help|-h) usage 0 ;;
+    esac
+  fi
+  MSG_PARTS+=("$1")
+  shift
+done
+
+if [[ ${#MSG_PARTS[@]} -eq 0 ]]; then
+  echo "[ERROR] 缺少 message" >&2
+  usage 2
+fi
+
+MESSAGE="${MSG_PARTS[*]}"
+PROJECT_DIR="$WORKSPACE_ROOT/projects/$SLUG"
+SESSION="$TMUX_PREFIX-$SLUG"
+
+command -v tmux >/dev/null || { echo "[ERROR] tmux 不在 PATH 中" >&2; exit 1; }
+[[ -d "$PROJECT_DIR" ]] || { echo "[ERROR] 项目不存在：$PROJECT_DIR" >&2; exit 1; }
+
+if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
+  echo "[ERROR] tmux 会话未运行：$SESSION" >&2
+  echo "        当前 workspace 运行中的会话：" >&2
+  "$SCRIPT_DIR/arisc" enter --list 2>/dev/null | sed 's/^/        /' >&2 || true
+  echo "        启动目标会话：arisc enter $SLUG" >&2
+  exit 1
+fi
+
+ensure_session_matches_project "$SESSION" "$PROJECT_DIR"
+
+echo "==> 目标 $SESSION 当前 pane 末尾 $PANE_LINES 行："
+echo "------------------------------------------------------------"
+capture_pane_tail "$SESSION" "$PANE_LINES" | sed 's/^/  /'
+echo "------------------------------------------------------------"
+echo "==> 将发送："
+echo "  $MESSAGE"
+echo ""
+
+if $DRY_RUN; then
+  echo "[INFO] --dry-run：未发送"
+  exit 0
+fi
+
+PANE="$(pane_target "$SESSION")"
+tmux send-keys -t "$PANE" C-u
+tmux send-keys -t "$PANE" -- "$MESSAGE"
+tmux send-keys -t "$PANE" Enter
+echo "[OK] 已发送到 $SESSION"
+echo "查看回复：arisc enter $SLUG"

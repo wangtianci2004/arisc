@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+# aris-status：只读输出 ARIS-Codex 工作区一屏状态。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+PROJECTS_DIR="$WORKSPACE_ROOT/projects"
+TMUX_PREFIX="aris-codex"
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/arisc-platform.sh
+source "$SCRIPT_DIR/../lib/arisc-platform.sh"
+
+WITH_PANE=false
+PANE_LINES=3
+JSON=false
+
+usage() {
+  local code="${1:-2}"
+  cat >&2 <<'EOF'
+用法：arisc status [--json] [--with-pane] [--pane-lines N]
+
+作用：
+  只读输出一屏 ARIS-Codex 工作区状态。它等价于 arisc watch --once，
+  适合在普通终端快速查看环境列表、goal 状态、告警摘要、需要关注项目和 tmux 会话。
+
+选项：
+  --json          输出机器可读 JSON，便于 base 或外部脚本消费
+  --with-pane     附加运行中 tmux pane 的末尾摘要，默认关闭
+  --pane-lines N  每个 pane 摘要行数，默认 3；仅在 --with-pane 时生效
+
+说明：
+  本命令不创建项目、不启动 Codex、不发送消息、不删除文件。
+EOF
+  exit "$code"
+}
+
+json_escape() {
+  local s="${1:-}"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\b'/\\b}
+  s=${s//$'\f'/\\f}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+canonical_dir() {
+  (cd "$1" 2>/dev/null && pwd -P) || return 1
+}
+
+session_matches_project() {
+  local session="$1" project_dir="$2" session_cwd expected actual
+  command -v tmux >/dev/null || return 1
+  tmux has-session -t "=$session" 2>/dev/null || return 1
+  session_cwd="$(tmux display-message -p -t "=$session:0.0" '#{pane_current_path}' 2>/dev/null || true)"
+  [[ -n "$session_cwd" ]] || return 1
+  expected="$(canonical_dir "$project_dir")" || return 1
+  actual="$(canonical_dir "$session_cwd")" || return 1
+  [[ "$actual" == "$expected" ]]
+}
+
+goal_preview() {
+  local state="$1"
+  [[ -f "$state" ]] || return 0
+  sed -n 's/^goal_preview	//p' "$state" | sed -n '1p' | cut -c1-80 || true
+}
+
+project_stage() {
+  local p="$1" stage="init"
+  [[ -f "$p/idea-stage/IDEA_REPORT.md" ]] && stage="ideas"
+  [[ -d "$p/experiments" ]] && stage="exp"
+  [[ -f "$p/review-stage/AUTO_REVIEW.md" ]] && stage="review"
+  [[ -f "$p/NARRATIVE_REPORT.md" ]] && stage="narrative"
+  [[ -f "$p/paper/main.pdf" ]] && stage="paper"
+  printf '%s' "$stage"
+}
+
+project_changed_date() {
+  local p="$1" mtime
+  mtime="$(arisc_latest_mtime_depth "$p" 3 || true)"
+  if [[ -n "$mtime" ]]; then
+    arisc_date_from_epoch "$mtime" "%Y-%m-%d"
+  else
+    printf '?'
+  fi
+}
+
+base_changed_date() {
+  local mtime
+  mtime="$(arisc_latest_mtime_depth "$PROJECTS_DIR" 2 || true)"
+  if [[ -n "$mtime" ]]; then
+    arisc_date_from_epoch "$mtime" "%Y-%m-%d"
+  else
+    printf '?'
+  fi
+}
+
+brief_title() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  grep -m1 -E "^#" "$file" 2>/dev/null | sed -E 's/^#+[[:space:]]*//' | cut -c1-80 || true
+}
+
+json_environment_object() {
+  local name="$1" type="$2" path="$3" stage="$4" changed="$5" tmux_state="$6" goal="$7" summary="$8"
+  printf '{"name":"%s","type":"%s","path":"%s","stage":"%s","last_changed":"%s","tmux_state":"%s","goal_preview":"%s","summary":"%s"}' \
+    "$(json_escape "$name")" \
+    "$(json_escape "$type")" \
+    "$(json_escape "$path")" \
+    "$(json_escape "$stage")" \
+    "$(json_escape "$changed")" \
+    "$(json_escape "$tmux_state")" \
+    "$(json_escape "$goal")" \
+    "$(json_escape "$summary")"
+}
+
+environments_json() {
+  local first=true p name changed stage tmux_state summary goal
+  printf '['
+  if [[ -d "$PROJECTS_DIR/.codex" || -f "$PROJECTS_DIR/AGENTS.md" ]]; then
+    changed="$(base_changed_date)"
+    tmux_state="-"
+    session_matches_project "$TMUX_PREFIX-base" "$PROJECTS_DIR" && tmux_state="running"
+    summary="$(brief_title "$PROJECTS_DIR/AGENTS.md")"
+    json_environment_object "base" "base" "$PROJECTS_DIR" "meta" "$changed" "$tmux_state" "-" "$summary"
+    first=false
+  fi
+
+  if [[ -d "$PROJECTS_DIR" ]]; then
+    shopt -s nullglob
+    for p in "$PROJECTS_DIR"/*/; do
+      [[ -d "$p" ]] || continue
+      name="$(basename "$p")"
+      changed="$(project_changed_date "$p")"
+      stage="$(project_stage "$p")"
+      tmux_state="-"
+      session_matches_project "$TMUX_PREFIX-$name" "${p%/}" && tmux_state="running"
+      summary="$(brief_title "$p/RESEARCH_BRIEF.md")"
+      goal="$(goal_preview "$p/.codex/aris-goal.tsv")"
+      [[ -n "$goal" ]] || goal="-"
+      if $first; then
+        first=false
+      else
+        printf ','
+      fi
+      json_environment_object "$name" "project" "${p%/}" "$stage" "$changed" "$tmux_state" "$goal" "$summary"
+    done
+    shopt -u nullglob
+  fi
+  printf ']'
+}
+
+workspace_sessions() {
+  if ! command -v tmux >/dev/null; then
+    return 0
+  fi
+
+  local session proj slug
+  if [[ -d "$PROJECTS_DIR/.codex" || -f "$PROJECTS_DIR/AGENTS.md" ]]; then
+    session="$TMUX_PREFIX-base"
+    if tmux has-session -t "=$session" 2>/dev/null && session_matches_project "$session" "$PROJECTS_DIR"; then
+      printf '%s\t%s\t%s\n' "$session" "base" "$PROJECTS_DIR"
+    fi
+  fi
+
+  [[ -d "$PROJECTS_DIR" ]] || return 0
+  shopt -s nullglob
+  for proj in "$PROJECTS_DIR"/*/; do
+    [[ -d "$proj" ]] || continue
+    slug="$(basename "$proj")"
+    session="$TMUX_PREFIX-$slug"
+    if tmux has-session -t "=$session" 2>/dev/null && session_matches_project "$session" "${proj%/}"; then
+      printf '%s\t%s\t%s\n' "$session" "$slug" "${proj%/}"
+    fi
+  done
+  shopt -u nullglob
+}
+
+session_pane_tail() {
+  local session="$1"
+  tmux capture-pane -t "=$session:0.0" -p -S -2000 2>/dev/null | tail -n "$PANE_LINES" || true
+}
+
+sessions_json() {
+  local first=true session slug path windows pane_tail
+  printf '['
+  while IFS=$'\t' read -r session slug path; do
+    [[ -n "$session" ]] || continue
+    windows="$(tmux list-windows -t "=$session" -F '#{window_index}' 2>/dev/null | wc -l | tr -d ' ')"
+    [[ -n "$windows" && "$windows" != "0" ]] || windows="0"
+    if $first; then
+      first=false
+    else
+      printf ','
+    fi
+    printf '{"name":"%s","slug":"%s","project_dir":"%s","windows":%s' \
+      "$(json_escape "$session")" \
+      "$(json_escape "$slug")" \
+      "$(json_escape "$path")" \
+      "$windows"
+    if $WITH_PANE; then
+      pane_tail="$(session_pane_tail "$session")"
+      printf ',"pane_tail":"%s"' "$(json_escape "$pane_tail")"
+    fi
+    printf '}'
+  done < <(workspace_sessions)
+  printf ']'
+}
+
+render_json() {
+  local goal_json alerts_json generated_at
+  generated_at="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  goal_json="$("$SCRIPT_DIR/aris-goal" --status --json)"
+  alerts_json="$("$SCRIPT_DIR/aris-alerts" --summary --json)"
+
+  printf '{"workspace_root":"%s","generated_at":"%s","with_pane":%s,"pane_lines":%s,' \
+    "$(json_escape "$WORKSPACE_ROOT")" \
+    "$(json_escape "$generated_at")" \
+    "$WITH_PANE" \
+    "$PANE_LINES"
+  printf '"environments":'
+  environments_json
+  printf ',"goals":%s' "$goal_json"
+  printf ',"alerts":%s' "$alerts_json"
+  printf ',"sessions":'
+  sessions_json
+  printf '}\n'
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON=true; shift ;;
+    --with-pane) WITH_PANE=true; shift ;;
+    --pane-lines)
+      [[ $# -ge 2 ]] || usage 2
+      PANE_LINES="$2"
+      [[ "$PANE_LINES" =~ ^[0-9]+$ && "$PANE_LINES" -gt 0 ]] || { echo "[ERROR] --pane-lines 必须是正整数：$PANE_LINES" >&2; exit 2; }
+      shift 2
+      ;;
+    --help|-h) usage 0 ;;
+    *) echo "[ERROR] 未知参数：$1" >&2; usage 2 ;;
+  esac
+done
+
+if $JSON; then
+  render_json
+  exit 0
+fi
+
+args=(--once)
+if $WITH_PANE; then
+  args+=(--with-pane --pane-lines "$PANE_LINES")
+fi
+
+exec "$SCRIPT_DIR/aris-watch" "${args[@]}"

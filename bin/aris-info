@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+# aris-info：输出 ARIS-Codex 工作区或项目的只读信息。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+if [[ -z "${ARIS_REPO:-}" && -f "$WORKSPACE_ROOT/config" ]]; then
+  # shellcheck disable=SC1090
+  source "$WORKSPACE_ROOT/config"
+fi
+ARIS_REPO="${ARIS_REPO:-$HOME/work/aris-codex-skills}"
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/arisc-platform.sh
+source "$SCRIPT_DIR/../lib/arisc-platform.sh"
+SLUG_RE='^[a-z0-9]+(-[a-z0-9]+)*$'
+
+JSON=false
+TARGET=""
+
+usage() {
+  local code="${1:-2}"
+  cat >&2 <<'EOF'
+用法：
+  arisc info [--json]
+  arisc info [--json] <slug|base>
+
+作用：
+  不带项目名时输出类似 conda info 的工作区总览。
+  带项目名时输出单个环境的路径、goal、tmux、Git 和接管命令摘要。
+
+选项：
+  --json  输出机器可读 JSON
+
+说明：
+  本命令只读取状态，不创建项目、不启动 Codex、不发送消息、不删除文件。
+EOF
+  exit "$code"
+}
+
+json_escape() {
+  local s="${1:-}"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\b'/\\b}
+  s=${s//$'\f'/\\f}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+resolve_path() {
+  local path="$1"
+  if [[ -z "$path" ]]; then
+    return 0
+  fi
+  arisc_realpath "$path" 2>/dev/null || printf '%s' "$path"
+}
+
+tool_path() {
+  command -v "$1" 2>/dev/null || true
+}
+
+bool_label() {
+  if [[ "$1" == "true" ]]; then
+    printf 'OK'
+  else
+    printf 'WARN'
+  fi
+}
+
+workspace_json() {
+  local status_json doctor_json audit_json doctor_code audit_code arisc_path aris_path
+  status_json="$("$SCRIPT_DIR/aris-status" --json)"
+  set +e
+  doctor_json="$("$SCRIPT_DIR/aris-doctor" --json 2>/dev/null)"
+  doctor_code=$?
+  audit_json="$("$SCRIPT_DIR/aris-audit" --json 2>/dev/null)"
+  audit_code=$?
+  set -e
+  if [[ "$doctor_code" -ne 0 || -z "$doctor_json" ]]; then
+    doctor_json='{"ok":false}'
+  fi
+  if [[ "$audit_code" -ne 0 || -z "$audit_json" ]]; then
+    audit_json='{"ok":false}'
+  fi
+  arisc_path="$(resolve_path "$(tool_path arisc)")"
+  aris_path="$(resolve_path "$(tool_path aris)")"
+
+  printf '{"workspace_root":"%s","aris_repo":"%s","generated_at":"%s","global":{"arisc":"%s","aris":"%s"},"status":%s,"doctor":%s,"audit":%s}\n' \
+    "$(json_escape "$WORKSPACE_ROOT")" \
+    "$(json_escape "$ARIS_REPO")" \
+    "$(json_escape "$(date '+%Y-%m-%dT%H:%M:%S%z')")" \
+    "$(json_escape "$arisc_path")" \
+    "$(json_escape "$aris_path")" \
+    "$status_json" \
+    "$doctor_json" \
+    "$audit_json"
+}
+
+render_workspace_text() {
+  local info_json project_count env_count session_count alerts_total blocked attention waiting stopped doctor_ok audit_ok command_count base_skill_count arisc_path aris_path
+  info_json="$(workspace_json)"
+  env_count="$(printf '%s\n' "$info_json" | jq -r '.status.environments | length')"
+  project_count="$(printf '%s\n' "$info_json" | jq -r '[.status.environments[] | select(.type == "project")] | length')"
+  session_count="$(printf '%s\n' "$info_json" | jq -r '.status.sessions | length')"
+  alerts_total="$(printf '%s\n' "$info_json" | jq -r '.status.alerts.summary.total')"
+  blocked="$(printf '%s\n' "$info_json" | jq -r '.status.alerts.summary.blocked')"
+  attention="$(printf '%s\n' "$info_json" | jq -r '.status.alerts.summary.attention')"
+  waiting="$(printf '%s\n' "$info_json" | jq -r '.status.alerts.summary.waiting')"
+  stopped="$(printf '%s\n' "$info_json" | jq -r '.status.alerts.summary.stopped')"
+  doctor_ok="$(printf '%s\n' "$info_json" | jq -r '.doctor.ok')"
+  audit_ok="$(printf '%s\n' "$info_json" | jq -r '.audit.ok')"
+  command_count="$(printf '%s\n' "$info_json" | jq -r '.audit.command_count // "-"')"
+  base_skill_count="$(printf '%s\n' "$info_json" | jq -r '.audit.base_skill_count // "-"')"
+  arisc_path="$(printf '%s\n' "$info_json" | jq -r '.global.arisc // ""')"
+  aris_path="$(printf '%s\n' "$info_json" | jq -r '.global.aris // ""')"
+
+  echo "# ARIS-Codex 信息"
+  echo ""
+  echo "- 生成时间：$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  echo "- 工作区：$WORKSPACE_ROOT"
+  echo "- ARIS_REPO：$ARIS_REPO"
+  echo "- 全局 arisc：${arisc_path:-未找到}"
+  echo "- 全局 aris：${aris_path:-未找到}"
+  echo ""
+  echo "## 规模"
+  echo "- 环境数：$env_count"
+  echo "- 项目数：$project_count"
+  echo "- 运行中 tmux 会话：$session_count"
+  echo "- 告警：total=${alerts_total}；blocked=${blocked}；attention=${attention}；waiting=${waiting}；stopped=$stopped"
+  echo ""
+  echo "## 健康"
+  echo "- doctor：$(bool_label "$doctor_ok")"
+  echo "- audit：$(bool_label "$audit_ok")；子命令=${command_count}；base 技能=$base_skill_count"
+  echo ""
+  echo "## 常用入口"
+  echo "  arisc status"
+  echo "  arisc env list"
+  echo "  arisc env info <slug>"
+  echo "  arisc agenda"
+  echo "  arisc triage"
+  echo "  arisc report"
+  echo "  arisc doctor"
+  echo "  arisc audit"
+}
+
+project_json() {
+  "$SCRIPT_DIR/aris-inspect" "$TARGET" --json
+}
+
+render_project_text() {
+  local item ok exists project_dir tmux_state pane_status goal_record goal_preview git_branch git_dirty git_last
+  item="$(project_json)"
+  ok="$(printf '%s\n' "$item" | jq -r '.ok')"
+  exists="$(printf '%s\n' "$item" | jq -r '.exists')"
+  project_dir="$(printf '%s\n' "$item" | jq -r '.project_dir')"
+  tmux_state="$(printf '%s\n' "$item" | jq -r '.tmux.state')"
+  pane_status="$(printf '%s\n' "$item" | jq -r '.tmux.pane_status')"
+  goal_record="$(printf '%s\n' "$item" | jq -r '.goal.has_goal_record')"
+  goal_preview="$(printf '%s\n' "$item" | jq -r '.goal.goal_preview')"
+  git_branch="$(printf '%s\n' "$item" | jq -r '.git.branch')"
+  git_dirty="$(printf '%s\n' "$item" | jq -r '.git.dirty')"
+  git_last="$(printf '%s\n' "$item" | jq -r '.git.last_commit')"
+
+  echo "# ARIS-Codex 环境信息"
+  echo ""
+  echo "- 环境：$TARGET"
+  echo "- 路径：$project_dir"
+  echo "- 存在：$exists"
+  echo "- 健康：$(bool_label "$ok")"
+  echo "- tmux：${tmux_state}；pane=$pane_status"
+  echo "- goal 记录：${goal_record}；摘要=$goal_preview"
+  echo "- Git：branch=${git_branch}；dirty=${git_dirty}；last=$git_last"
+  echo ""
+  echo "## 常用入口"
+  echo "  arisc env info $TARGET"
+  echo "  arisc env export $TARGET"
+  echo "  arisc inspect $TARGET --with-pane --pane-lines 20"
+  echo "  arisc goal --peek $TARGET 40"
+  echo "  arisc env run $TARGET -- python -V"
+  echo "  arisc run $TARGET -- python -V"
+  echo "  eval \"\$(arisc env activate $TARGET)\""
+  echo "  eval \"\$(arisc activate $TARGET)\""
+  echo "  arisc enter $TARGET"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON=true; shift ;;
+    --help|-h) usage 0 ;;
+    --*) echo "[ERROR] 未知参数：$1" >&2; usage 2 ;;
+    *)
+      if [[ -n "$TARGET" ]]; then
+        usage 2
+      fi
+      TARGET="$1"
+      shift
+      ;;
+  esac
+done
+
+command -v jq >/dev/null || { echo "[ERROR] jq 不在 PATH 中" >&2; exit 1; }
+
+if [[ -n "$TARGET" && "$TARGET" != "base" && ! "$TARGET" =~ $SLUG_RE ]]; then
+  echo "[ERROR] slug 必须是 kebab-case 或 base：$TARGET" >&2
+  exit 1
+fi
+
+if [[ -z "$TARGET" ]]; then
+  if $JSON; then
+    workspace_json
+  else
+    render_workspace_text
+  fi
+else
+  if $JSON; then
+    project_json
+  else
+    render_project_text
+  fi
+fi

@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# aris-ls：列出 ARIS-Codex 工作区中的环境状态。
+set -euo pipefail
+
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$HOME/arisc}"
+PROJECTS_DIR="$WORKSPACE_ROOT/projects"
+TMUX_PREFIX="aris-codex"
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/arisc-platform.sh
+source "$SCRIPT_DIR/../lib/arisc-platform.sh"
+JSON=false
+
+usage() {
+  local code="${1:-2}"
+  cat >&2 <<'EOF'
+用法：arisc ls [--json]
+
+作用：
+  列出 ARIS-Codex 工作区中的 base 和所有普通项目，包含阶段、tmux 状态、
+  最近 goal 摘要和研究简报标题。
+
+选项：
+  --json  输出机器可读 JSON
+EOF
+  exit "$code"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON=true; shift ;;
+    --help|-h) usage 0 ;;
+    *) echo "[ERROR] 未知参数：$1" >&2; usage 2 ;;
+  esac
+done
+
+json_escape() {
+  local s="${1:-}"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\b'/\\b}
+  s=${s//$'\f'/\\f}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+if [[ ! -d "$PROJECTS_DIR" ]]; then
+  if $JSON; then
+    printf '{"workspace_root":"%s","generated_at":"%s","items":[]}\n' "$(json_escape "$WORKSPACE_ROOT")" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    exit 0
+  fi
+  echo "[INFO] 还没有项目：$PROJECTS_DIR 不存在"
+  exit 0
+fi
+
+shopt -s nullglob
+PROJECTS=("$PROJECTS_DIR"/*/)
+shopt -u nullglob
+
+BASE_CODEX="$PROJECTS_DIR/.codex"
+if [[ ${#PROJECTS[@]} -eq 0 && ! -d "$BASE_CODEX" ]]; then
+  if $JSON; then
+    printf '{"workspace_root":"%s","generated_at":"%s","items":[]}\n' "$(json_escape "$WORKSPACE_ROOT")" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    exit 0
+  fi
+  echo "[INFO] 还没有项目，请运行：arisc new <slug>"
+  exit 0
+fi
+
+declare -A RUNNING_SESSIONS=()
+
+goal_preview() {
+  local state="$1"
+  [[ -f "$state" ]] || return 0
+  sed -n 's/^goal_preview	//p' "$state" | sed -n '1p' | cut -c1-40 || true
+}
+
+canonical_dir() {
+  (cd "$1" 2>/dev/null && pwd -P) || return 1
+}
+
+session_matches_project() {
+  local session="$1" project_dir="$2" session_cwd expected actual
+  command -v tmux >/dev/null || return 1
+  tmux has-session -t "=$session" 2>/dev/null || return 1
+  session_cwd="$(tmux display-message -p -t "=$session:0.0" '#{pane_current_path}' 2>/dev/null || true)"
+  [[ -n "$session_cwd" ]] || return 1
+  expected="$(canonical_dir "$project_dir")" || return 1
+  actual="$(canonical_dir "$session_cwd")" || return 1
+  [[ "$actual" == "$expected" ]]
+}
+
+changed_date_for_project() {
+  local p="$1" mtime
+  mtime="$(arisc_latest_mtime_depth "$p" 3 || true)"
+  if [[ -n "$mtime" ]]; then
+    arisc_date_from_epoch "$mtime" "%Y-%m-%d"
+  else
+    printf '?'
+  fi
+}
+
+changed_date_for_base() {
+  local mtime
+  mtime="$(arisc_latest_mtime_depth "$PROJECTS_DIR" 2 || true)"
+  if [[ -n "$mtime" ]]; then
+    arisc_date_from_epoch "$mtime" "%Y-%m-%d"
+  else
+    printf '?'
+  fi
+}
+
+project_stage() {
+  local p="$1" stage="init"
+  [[ -f "$p/idea-stage/IDEA_REPORT.md" ]] && stage="ideas"
+  [[ -d "$p/experiments" ]] && stage="exp"
+  [[ -f "$p/review-stage/AUTO_REVIEW.md" ]] && stage="review"
+  [[ -f "$p/NARRATIVE_REPORT.md" ]] && stage="narrative"
+  [[ -f "$p/paper/main.pdf" ]] && stage="paper"
+  printf '%s' "$stage"
+}
+
+brief_title() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  grep -m1 -E "^#" "$file" 2>/dev/null | sed -E 's/^#+[[:space:]]*//' | cut -c1-50 || true
+}
+
+emit_item_json() {
+  local name="$1" type="$2" path="$3" changed="$4" stage="$5" tmux_state="$6" goal="$7" summary="$8"
+  printf '{"name":"%s","type":"%s","path":"%s","last_changed":"%s","stage":"%s","tmux_state":"%s","goal_preview":"%s","summary":"%s"}' \
+    "$(json_escape "$name")" \
+    "$(json_escape "$type")" \
+    "$(json_escape "$path")" \
+    "$(json_escape "$changed")" \
+    "$(json_escape "$stage")" \
+    "$(json_escape "$tmux_state")" \
+    "$(json_escape "$goal")" \
+    "$(json_escape "$summary")"
+}
+
+render_json() {
+  local first=true bdate btmux bbrief p name date_str stage tmux_state brief goal
+  printf '{"workspace_root":"%s","generated_at":"%s","items":[' "$(json_escape "$WORKSPACE_ROOT")" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+
+  if [[ -d "$BASE_CODEX" || -f "$PROJECTS_DIR/AGENTS.md" ]]; then
+    bdate="$(changed_date_for_base)"
+    btmux="-"
+    session_matches_project "$TMUX_PREFIX-base" "$PROJECTS_DIR" && btmux="running"
+    bbrief="$(brief_title "$PROJECTS_DIR/AGENTS.md")"
+    emit_item_json "base" "base" "$PROJECTS_DIR" "$bdate" "meta" "$btmux" "-" "$bbrief"
+    first=false
+  fi
+
+  for p in "${PROJECTS[@]}"; do
+    name="$(basename "$p")"
+    date_str="$(changed_date_for_project "$p")"
+    stage="$(project_stage "$p")"
+    tmux_state="-"
+    session_matches_project "$TMUX_PREFIX-$name" "${p%/}" && tmux_state="running"
+    brief="$(brief_title "$p/RESEARCH_BRIEF.md")"
+    goal="$(goal_preview "$p/.codex/aris-goal.tsv")"
+    [[ -n "$goal" ]] || goal="-"
+    if $first; then
+      first=false
+    else
+      printf ','
+    fi
+    emit_item_json "$name" "project" "${p%/}" "$date_str" "$stage" "$tmux_state" "$goal" "$brief"
+  done
+
+  printf ']}\n'
+}
+
+if $JSON; then
+  render_json
+  exit 0
+fi
+
+printf "%-28s %-12s %-10s %-8s %-40s %s\n" "环境" "最近变更" "阶段" "会话" "最近 goal" "摘要"
+printf "%-28s %-12s %-10s %-8s %-40s %s\n" "---" "--------" "----" "----" "--------" "----"
+
+if [[ -d "$BASE_CODEX" || -f "$PROJECTS_DIR/AGENTS.md" ]]; then
+  bdate="$(changed_date_for_base)"
+  btmux="-"
+  session_matches_project "$TMUX_PREFIX-base" "$PROJECTS_DIR" && btmux="running"
+  bbrief="$(brief_title "$PROJECTS_DIR/AGENTS.md")"
+  printf "%-28s %-12s %-10s %-8s %-40s %s\n" "base" "$bdate" "meta" "$btmux" "-" "$bbrief"
+fi
+
+for p in "${PROJECTS[@]}"; do
+  name=$(basename "$p")
+
+  date_str="$(changed_date_for_project "$p")"
+  stage="$(project_stage "$p")"
+
+  tmux_state="-"
+  session_matches_project "$TMUX_PREFIX-$name" "${p%/}" && tmux_state="running"
+
+  brief="$(brief_title "$p/RESEARCH_BRIEF.md")"
+  goal="$(goal_preview "$p/.codex/aris-goal.tsv")"
+  [[ -n "$goal" ]] || goal="-"
+
+  printf "%-28s %-12s %-10s %-8s %-40s %s\n" "$name" "$date_str" "$stage" "$tmux_state" "$goal" "$brief"
+done
