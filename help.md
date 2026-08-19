@@ -28,7 +28,7 @@ brew install bash jq tmux uv
 
 ## 第一次使用
 
-`install.sh --yes` 会自动克隆并设置 ARIS Codex skills 上游仓库。若安装时使用了 `--skip-repo`，可在之后非交互配置：
+`install.sh --yes` 会自动初始化并设置根目录 `aris-codex-skills` submodule。若安装时使用了 `--skip-repo`，可在之后非交互配置：
 
 ```bash
 arisc repo setup
@@ -775,19 +775,19 @@ base 里可用这些协调技能：
 
 ## 更新 skills 和项目
 
-拉取上游 skills 并收敛所有项目：
+更新根目录 ARIS skills submodule 并收敛所有项目：
 
 ```bash
 arisc update
 ```
 
-只收敛项目，不拉取上游：
+只收敛项目，不更新 submodule：
 
 ```bash
 arisc update --projects-only
 ```
 
-只拉取上游，不处理项目：
+只更新 submodule，不处理项目：
 
 ```bash
 arisc update --repo-only

@@ -14,10 +14,33 @@ elif [[ -f "$CONFIG_FILE" ]]; then
   source "$CONFIG_FILE"
   [[ -n "${ARIS_REPO:-}" ]] && SOURCE="配置文件（${CONFIG_FILE}）"
 fi
-ARIS_REPO="${ARIS_REPO:-$HOME/work/aris-codex-skills}"
+ARIS_REPO="${ARIS_REPO:-$WORKSPACE_ROOT/aris-codex-skills}"
+BUNDLED_REPO="$WORKSPACE_ROOT/aris-codex-skills"
+BUNDLED_PATH="aris-codex-skills"
 
 looks_like_codex_repo() {
   [[ -x "$1/tools/install_aris_codex.sh" && -d "$1/skills/skills-codex" ]]
+}
+
+is_git_repo() {
+  git -C "$1" rev-parse --is-inside-work-tree >/dev/null 2>&1
+}
+
+is_bundled_repo() {
+  [[ "$1" == "$BUNDLED_REPO" && -f "$WORKSPACE_ROOT/.gitmodules" ]] &&
+    git -C "$WORKSPACE_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1
+}
+
+init_bundled_repo() {
+  echo "  -> 初始化根目录 ARIS skills submodule"
+  git -C "$WORKSPACE_ROOT" submodule sync -- "$BUNDLED_PATH"
+  git -C "$WORKSPACE_ROOT" submodule update --init --recursive -- "$BUNDLED_PATH"
+}
+
+update_bundled_repo() {
+  echo "  -> 更新根目录 ARIS skills submodule"
+  git -C "$WORKSPACE_ROOT" submodule sync -- "$BUNDLED_PATH"
+  git -C "$WORKSPACE_ROOT" submodule update --init --remote --checkout --recursive -- "$BUNDLED_PATH"
 }
 
 print_status() {
@@ -27,7 +50,7 @@ print_status() {
     echo "状态              : 缺失（路径不存在）"
     return
   fi
-  if [[ ! -d "$ARIS_REPO/.git" ]]; then
+  if ! is_git_repo "$ARIS_REPO"; then
     echo "状态              : 路径存在但不是 Git 仓库"
     return
   fi
@@ -70,12 +93,17 @@ EOF
 
 clone_or_pull() {
   local path="$1"
+  if is_bundled_repo "$path"; then
+    init_bundled_repo
+    update_bundled_repo
+    return
+  fi
   if [[ ! -d "$path" ]]; then
     echo "  -> 克隆 $UPSTREAM_URL -> $path"
     git clone "$UPSTREAM_URL" "$path"
     return
   fi
-  if [[ ! -d "$path/.git" ]]; then
+  if ! is_git_repo "$path"; then
     echo "[ERROR] $path 已存在但不是 Git 仓库，拒绝覆盖" >&2
     return 1
   fi
@@ -100,6 +128,10 @@ setup_non_interactive() {
     *) path="$(pwd)/$path" ;;
   esac
 
+  if is_bundled_repo "$path" && ! is_git_repo "$path"; then
+    init_bundled_repo
+  fi
+
   if [[ ! -e "$path" ]]; then
     command -v git >/dev/null 2>&1 || {
       echo "[ERROR] 自动配置 ARIS_REPO 需要 git" >&2
@@ -108,7 +140,7 @@ setup_non_interactive() {
     mkdir -p "$(dirname "$path")"
     echo "  -> 克隆 $UPSTREAM_URL -> $path"
     git clone "$UPSTREAM_URL" "$path"
-  elif [[ ! -d "$path/.git" ]]; then
+  elif ! is_git_repo "$path"; then
     echo "[ERROR] $path 已存在但不是 Git 仓库，拒绝覆盖" >&2
     return 1
   else
@@ -141,7 +173,9 @@ interactive() {
   echo ""
   echo "── 计划 ──"
   echo "  目标    : $new_path"
-  if [[ -d "$new_path/.git" ]]; then
+  if is_bundled_repo "$new_path"; then
+    echo "  动作    : 更新根目录 submodule"
+  elif is_git_repo "$new_path"; then
     echo "  动作    : git pull"
   elif [[ -d "$new_path" ]]; then
     echo "  动作    : 中止（路径存在但不是 Git 仓库）"
@@ -185,7 +219,7 @@ case "$sub" in
   setup|init)
     shift
     [[ $# -le 1 ]] || { echo "[ERROR] 用法：arisc repo setup [path]" >&2; exit 2; }
-    setup_non_interactive "${1:-$ARIS_REPO}"
+    setup_non_interactive "${1:-$BUNDLED_REPO}"
     ;;
   --help|-h|help)
     cat <<'EOF'
@@ -197,7 +231,7 @@ case "$sub" in
 交互流程：
   1. 显示当前 ARIS_REPO 和 Git 状态。
   2. 输入新的上游路径，回车表示沿用当前路径。
-  3. 如果路径不存在则克隆上游；如果已是 Git 仓库则 git pull。
+  3. 默认初始化或更新根目录 aris-codex-skills submodule；自定义路径沿用 clone/pull。
   4. 验证 tools/install_aris_codex.sh 和 skills/skills-codex。
   5. 写入 $WORKSPACE_ROOT/config。
 
@@ -205,7 +239,8 @@ case "$sub" in
   https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep
 
 非交互配置：
-  `setup` 会在目标不存在时克隆上游，验证 Codex 技能链并写入 config；
+  `setup` 默认初始化根目录 submodule；目标不存在且不是 submodule 时克隆上游；
+  随后验证 Codex 技能链并写入 config；
   已存在的仓库不会被自动更新。可用 ARIS_REPO_URL 覆盖克隆地址。
 EOF
     ;;

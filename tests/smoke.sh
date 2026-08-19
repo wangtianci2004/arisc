@@ -7,7 +7,7 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 
 TEST_HOME="$TEST_ROOT/home"
 WORKSPACE="$TEST_HOME/arisc"
-TEST_REPO="${ARISC_TEST_UPSTREAM_REPO:-$TEST_ROOT/aris-skills}"
+TEST_REPO="${ARISC_TEST_UPSTREAM_REPO:-$WORKSPACE/aris-codex-skills}"
 FAKE_BIN="$TEST_ROOT/bin"
 mkdir -p "$TEST_HOME" "$FAKE_BIN"
 mkdir -p "$WORKSPACE"
@@ -16,6 +16,7 @@ rsync -a \
   --exclude='/projects/' \
   --exclude='/shared/' \
   --exclude='/reports/' \
+  --exclude='/aris-codex-skills/' \
   --exclude='/.trash/' \
   --exclude='/config' \
   --exclude='/task_plan.md' \
@@ -50,17 +51,35 @@ chmod +x .venv/bin/python
 UV
 chmod +x "$FAKE_BIN/uv"
 
+REAL_GIT_BIN="$(command -v git)"
+cat > "$FAKE_BIN/git" <<'GIT_WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ ${1:-} == "clone" ]]; then
+  echo "unexpected network clone during isolated smoke test" >&2
+  exit 97
+fi
+exec "$ARISC_TEST_REAL_GIT" "$@"
+GIT_WRAPPER
+chmod +x "$FAKE_BIN/git"
+
 export HOME="$TEST_HOME"
 export PATH="$FAKE_BIN:$TEST_HOME/.local/bin:$PATH"
+export ARISC_TEST_REAL_GIT="$REAL_GIT_BIN"
 unset WORKSPACE_ROOT ARIS_REPO
 
-"$WORKSPACE/install.sh" --yes --no-path --skip-doctor --repo-path "$TEST_REPO"
+INSTALL_ARGS=(--yes --no-path --skip-doctor)
+if [[ -n "${ARISC_TEST_UPSTREAM_REPO:-}" ]]; then
+  INSTALL_ARGS+=(--repo-path "$TEST_REPO")
+fi
+"$WORKSPACE/install.sh" "${INSTALL_ARGS[@]}"
 
 [[ -L "$TEST_HOME/.local/bin/arisc" ]]
 [[ ! -e "$TEST_HOME/.local/bin/aris" ]]
 [[ ! -e "$WORKSPACE/bin/aris" ]]
 [[ -f "$WORKSPACE/config" ]]
 grep -Fq "ARIS_REPO=\"$TEST_REPO\"" "$WORKSPACE/config"
+[[ "$TEST_REPO" == "$WORKSPACE/aris-codex-skills" || -n "${ARISC_TEST_UPSTREAM_REPO:-}" ]]
 [[ "$(arisc --version)" == "arisc 0.1.0" ]]
 
 arisc new reproducible-research >/dev/null

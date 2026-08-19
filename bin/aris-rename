@@ -8,7 +8,7 @@ if [[ -z "${ARIS_REPO:-}" && -f "$WORKSPACE_ROOT/config" ]]; then
   # shellcheck disable=SC1090
   source "$WORKSPACE_ROOT/config"
 fi
-ARIS_REPO="${ARIS_REPO:-$HOME/work/aris-codex-skills}"
+ARIS_REPO="${ARIS_REPO:-$WORKSPACE_ROOT/aris-codex-skills}"
 
 usage() {
   cat >&2 <<'EOF'

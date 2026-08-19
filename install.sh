@@ -120,7 +120,7 @@ if $DO_REPO; then
   if [[ -n "$REPO_PATH" ]]; then
     WORKSPACE_ROOT="$WORKSPACE_ROOT" "$WORKSPACE_ROOT/bin/aris-repo" setup "$REPO_PATH"
   else
-    WORKSPACE_ROOT="$WORKSPACE_ROOT" "$WORKSPACE_ROOT/bin/aris-repo" setup
+    WORKSPACE_ROOT="$WORKSPACE_ROOT" "$WORKSPACE_ROOT/bin/aris-repo" setup "${ARIS_REPO:-$WORKSPACE_ROOT/aris-codex-skills}"
   fi
 else
   echo "[INFO] --skip-repo：跳过 ARIS 研究技能仓库配置"

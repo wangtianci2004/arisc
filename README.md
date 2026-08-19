@@ -70,12 +70,19 @@ brew install bash jq tmux uv
 
 如果尚未安装 Homebrew，请先按照 [Homebrew 官方安装文档](https://docs.brew.sh/Installation)完成安装。Codex CLI 仍需按其官方方式单独安装。
 
+### 使用 Agent 安装或卸载
+
+- [Agent 一键安装提示词](AGENT_INSTALL_PROMPT.md)：让终端 Agent 自动识别系统、安装依赖、初始化根目录 submodule 并完成验证。
+- [Agent 安全卸载提示词](AGENT_UNINSTALL_PROMPT.md)：先备份或迁移研究数据，再精确移除 ARISC 命令、shell 配置、后台会话和工作区。
+
+卸载提示词默认不会直接删除 `projects/`、`shared/`、`reports/`、`.trash/` 或 `config`；Agent 必须先让你选择备份、保留或永久删除。
+
 ### 新设备一键配置
 
 在新设备执行下面的一键安装命令：
 
 ```bash
-git clone https://github.com/wangtianci2004/arisc.git ~/arisc \
+git clone --recurse-submodules https://github.com/wangtianci2004/arisc.git ~/arisc \
   && ~/arisc/install.sh --yes
 ```
 
@@ -84,7 +91,7 @@ git clone https://github.com/wangtianci2004/arisc.git ~/arisc \
 1. 初始化 `projects/` 与 `shared/` 本地目录；
 2. 注册 `~/.local/bin/arisc -> ~/arisc/bin/arisc`；
 3. 初始化本机密钥与 MCP 配置模板；
-4. 克隆并验证 ARIS Codex 研究技能仓库；
+4. 初始化并验证根目录 `aris-codex-skills` submodule；
 5. 在需要时安装 `uv`；
 6. 物化 base 控制面并运行健康检查。
 
@@ -93,11 +100,31 @@ git clone https://github.com/wangtianci2004/arisc.git ~/arisc \
 ```bash
 exec "$SHELL" -l
 arisc doctor
+arisc enter base
 arisc new my-first-research
 arisc enter my-first-research
 ```
 
 在项目中先编辑 `RESEARCH_BRIEF.md`，再通过 Codex 启动研究流程。tmux 中按 `Ctrl+B`、再按 `D` 即可安全分离；后台会话会继续运行。
+
+### 默认 base 管理环境
+
+ARISC 安装后会自动物化一个内置的 `base` 环境。它不是具体科研项目，而是提供给 Agent 的工作区控制环境，用于观察、管理和调度 `projects/` 下的所有研究项目：
+
+```bash
+arisc enter base
+```
+
+base Agent 会加载 `templates/base/skills/` 中的 ARISC Control Skills，因此能够理解并调用 `arisc status`、`alerts`、`agenda`、`goal`、`report`、`doctor`、`audit` 等管理命令。它适合处理“哪些项目被阻塞”“给项目投递下一步目标”“生成全局交接报告”“检查所有环境”等跨项目任务。
+
+具体的文献、实验和论文工作仍应在独立项目中完成；这些项目使用 `aris-codex-skills` submodule 提供的 AIRS Research Skills：
+
+```bash
+arisc new my-research
+arisc enter my-research
+```
+
+简单理解：`base` 负责管理项目，`projects/<slug>` 负责执行科研。
 
 ### 已克隆仓库的安装选项
 
@@ -109,12 +136,7 @@ arisc enter my-first-research
 ./install.sh --skip-doctor               # 跳过安装后的健康检查
 ```
 
-若需要使用研究技能仓库的 fork，可在安装前设置：
-
-```bash
-export ARIS_REPO_URL=https://github.com/your-org/your-aris-skills-fork.git
-./install.sh --yes
-```
+默认上游以根目录 Git submodule 管理，GitHub 会显示为 `aris-codex-skills @ <commit>`。高级用户仍可通过 `--repo-path` 临时使用自定义技能仓库。
 
 ## 功能全景
 
@@ -220,6 +242,8 @@ arisc reports --path current
 
 ### base 控制面
 
+`base` 是 ARISC 默认提供的 Agent 管理环境。`arisc base ...` 适合从普通终端直接调用控制功能，`arisc enter base` 或 `arisc base enter` 则进入持久化的 base Codex 会话，让 Agent 使用内置 Control Skills 管理其他所有环境。base 只负责跨项目观察、调度、诊断与交接，不承载具体科研实现。
+
 | 命令 | 说明 |
 | --- | --- |
 | `arisc base` | 默认输出统一工作区总览 |
@@ -267,10 +291,10 @@ arisc env path <slug>
 
 | 命令 | 说明 |
 | --- | --- |
-| `arisc repo` | 交互选择、克隆或更新 ARIS Codex 研究技能仓库 |
-| `arisc repo status` | 查看技能仓库来源、远端、分支与 Codex 链路状态 |
-| `arisc repo setup [path]` | 非交互克隆/验证技能仓库并写入本机配置 |
-| `arisc update` | 拉取已配置的技能仓库并收敛所有项目技能链接 |
+| `arisc repo` | 初始化、选择或更新 ARIS Codex 研究技能仓库 |
+| `arisc repo status` | 查看根目录 submodule 的远端、提交与 Codex 链路状态 |
+| `arisc repo setup [path]` | 默认初始化根目录 submodule；也可验证自定义仓库路径 |
+| `arisc update` | 更新根目录 submodule，并收敛所有项目技能链接 |
 
 设备专属的绝对路径写在根目录 `config` 中，该文件被 Git 忽略。发布仓库不会包含维护者机器上的路径。
 
@@ -279,6 +303,7 @@ arisc env path <slug>
 ```text
 ~/arisc/
 ├── bin/                  # arisc 分发器与全部 aris-* 子命令
+├── aris-codex-skills/    # 官方 ARIS skills submodule（GitHub 显示 path @ commit）
 ├── templates/            # 项目、共享配置和 base 技能模板
 ├── tests/                # 隔离烟雾测试
 ├── projects/             # 本机项目与 base 控制面（Git ignored）
@@ -332,6 +357,7 @@ projects/<slug>/
 
 ```bash
 git -C ~/arisc pull --ff-only
+git -C ~/arisc submodule update --init --recursive
 ~/arisc/install.sh --yes
 arisc update
 arisc doctor
@@ -356,11 +382,7 @@ arisc repo setup
 arisc repo status
 ```
 
-若使用 fork：
-
-```bash
-ARIS_REPO_URL=https://github.com/your-org/aris-skills.git arisc repo setup ~/work/aris-codex-skills
-```
+默认路径应为 `~/arisc/aris-codex-skills`。如果 submodule 未初始化，运行 `arisc repo setup` 即可恢复。
 
 ### 项目骨架或链接异常
 

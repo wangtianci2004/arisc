@@ -1,0 +1,4 @@
+[submodule "aris-codex-skills"]
+	path = aris-codex-skills
+	url = https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep.git
+	branch = main

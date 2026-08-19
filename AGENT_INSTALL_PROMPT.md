@@ -37,17 +37,20 @@ https://github.com/wangtianci2004/arisc
 
 6. 如果目录不存在，执行：
 
-   git clone https://github.com/wangtianci2004/arisc.git ~/arisc
+   git clone --recurse-submodules https://github.com/wangtianci2004/arisc.git ~/arisc
 
 7. 如果目录已经存在：
    - 不要删除 projects、shared、reports、config 或 .trash；
    - 先检查 Git 状态；
    - 平台代码没有未提交修改时，执行 git -C ~/arisc pull --ff-only；
+   - 随后执行 git -C ~/arisc submodule update --init --recursive；
    - 存在未提交的平台代码修改时，不要覆盖，先向我报告。
 
 8. 执行一键安装：
 
    ~/arisc/install.sh --yes
+
+   安装器必须初始化根目录的 ~/arisc/aris-codex-skills submodule，不要把上游克隆到 ~/work 或其他工作区外目录。
 
 9. 让当前终端立即识别命令入口：
 

@@ -21,6 +21,11 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Verify bundled ARIS skills
+        run: test -x aris-codex-skills/tools/install_aris_codex.sh
 
       - name: Install test dependencies (Ubuntu)
         if: runner.os == 'Linux'

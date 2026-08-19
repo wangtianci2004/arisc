@@ -7,7 +7,7 @@ if [[ -z "${ARIS_REPO:-}" && -f "$WORKSPACE_ROOT/config" ]]; then
   # shellcheck disable=SC1090
   source "$WORKSPACE_ROOT/config"
 fi
-ARIS_REPO="${ARIS_REPO:-$HOME/work/aris-codex-skills}"
+ARIS_REPO="${ARIS_REPO:-$WORKSPACE_ROOT/aris-codex-skills}"
 
 require_codex_repo() {
   if [[ ! -d "$ARIS_REPO" ]]; then
@@ -38,7 +38,7 @@ slug 必须是 kebab-case，只能包含 a-z、0-9 和连字符，例如：
 
 环境变量：
   WORKSPACE_ROOT  默认：~/arisc
-  ARIS_REPO       默认：~/work/aris-codex-skills
+  ARIS_REPO       默认：$WORKSPACE_ROOT/aris-codex-skills
 EOF
   exit 2
 }

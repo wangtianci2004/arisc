@@ -130,6 +130,9 @@ check_docs() {
   has_text "$WORKSPACE_ROOT/README.md" "~/.local/bin/arisc -> ~/arisc/bin/arisc" || add_issue "docs" "global arisc" "README.md 未说明全局 arisc 入口"
   has_text "$WORKSPACE_ROOT/help.md" "~/.local/bin/arisc" || add_issue "docs" "global arisc" "help.md 未说明全局 arisc 入口"
   has_text "$WORKSPACE_ROOT/install.sh" 'GLOBAL_ARISC="$USER_BIN/arisc"' || add_issue "install" "global arisc" "install.sh 未注册全局 arisc"
+  has_text "$WORKSPACE_ROOT/.gitmodules" 'path = aris-codex-skills' || add_issue "submodule" "path" ".gitmodules 未声明根目录 aris-codex-skills"
+  has_text "$WORKSPACE_ROOT/.gitmodules" 'https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep.git' || add_issue "submodule" "url" ".gitmodules 未指向官方 ARIS 仓库"
+  has_text "$SCRIPT_DIR/aris-update" 'submodule update --init --remote --checkout --recursive' || add_issue "submodule" "update" "arisc update 未更新根目录 submodule"
 
   arisc_help="$("$SCRIPT_DIR/arisc" help)"
   for cmd in "${COMMANDS[@]}"; do

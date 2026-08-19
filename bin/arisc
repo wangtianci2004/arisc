@@ -134,7 +134,7 @@ arisc：多项目 ARIS-Codex 工作区管理器
   cd $(arisc path llm-tokenizer)              # 进入项目目录
   arisc del llm-tokenizer                     # 软删除，默认需要确认
   arisc restore llm-tokenizer                 # 恢复软删除项目
-  arisc update                                # 拉取上游并收敛所有项目
+  arisc update                                # 更新根目录 submodule 并收敛所有项目
   arisc doctor                                # 检查悬空链接和缺失文件
   arisc doctor --json                         # 输出机器可读检查结果
   arisc audit                                 # 审计命令、文档和 base 技能同步情况
@@ -147,7 +147,7 @@ tmux 常用操作
 
 环境变量覆盖
   WORKSPACE_ROOT  默认：~/arisc
-  ARIS_REPO       默认：~/work/aris-codex-skills
+  ARIS_REPO       默认：$WORKSPACE_ROOT/aris-codex-skills
                   也会读取 `arisc repo` 写入的 $WORKSPACE_ROOT/config
   CODEX_BIN       默认：codex；用于 arisc enter / arisc goal 启动 Codex
 
