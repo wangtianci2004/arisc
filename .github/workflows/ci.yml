@@ -27,9 +27,11 @@ jobs:
       - name: Verify bundled ARIS skills
         run: test -x aris-codex-skills/tools/install_aris_codex.sh
 
-      - name: Install test dependencies (Ubuntu)
+      - name: Verify test dependencies (Ubuntu)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y jq shellcheck tmux
+        run: |
+          command -v jq
+          command -v shellcheck
 
       - name: Install test dependencies (macOS)
         if: runner.os == 'macOS'
